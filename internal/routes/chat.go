@@ -290,52 +290,6 @@ func syncConversationMessages(convID string, messages []models.Message) {
 	}
 }
 
-func mergeConversationMessages(localMessages []models.Message, requestMessages []models.Message) []models.Message {
-	filteredRequest := make([]models.Message, 0, len(requestMessages))
-	for _, message := range requestMessages {
-		if message.Role == "system" {
-			continue
-		}
-		if strings.TrimSpace(utils.FormatMessageForMiMo(message)) == "" {
-			continue
-		}
-		filteredRequest = append(filteredRequest, message)
-	}
-
-	if len(localMessages) == 0 {
-		return filteredRequest
-	}
-	if len(filteredRequest) == 0 {
-		return localMessages
-	}
-
-	maxOverlap := 0
-	maxCheck := len(localMessages)
-	if len(filteredRequest) < maxCheck {
-		maxCheck = len(filteredRequest)
-	}
-
-	for overlap := maxCheck; overlap >= 1; overlap-- {
-		match := true
-		for i := 0; i < overlap; i++ {
-			local := localMessages[len(localMessages)-overlap+i]
-			req := filteredRequest[i]
-			if local.Role != req.Role || utils.FormatMessageForMiMo(local) != utils.FormatMessageForMiMo(req) {
-				match = false
-				break
-			}
-		}
-		if match {
-			maxOverlap = overlap
-			break
-		}
-	}
-
-	merged := append([]models.Message{}, localMessages...)
-	merged = append(merged, filteredRequest[maxOverlap:]...)
-	return merged
-}
-
 func buildConversationQuery(messages []models.Message, toolInstructions string) string {
 	var processedMessages []string
 	var systemPrompt string
@@ -559,14 +513,7 @@ func handleChatCompletions(c *gin.Context) {
 		}
 
 		syncConversationMessages(convID, input.Messages)
-		localMsgs, _ = services.GetLocalHistory(convID)
-		mergedMessages := mergeConversationMessages(localMsgs, input.Messages)
-
-		queryMessages := mergedMessages
-		if len(queryMessages) == 0 {
-			queryMessages = input.Messages
-		}
-		query = buildConversationQuery(queryMessages, toolInstructions)
+		query = buildConversationQuery(input.Messages, toolInstructions)
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		query = utils.FormatMessageForMiMo(lastMessage)

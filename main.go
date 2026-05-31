@@ -50,6 +50,30 @@ func errString(err error) string {
 	return err.Error()
 }
 
+func maskValue(raw string) gin.H {
+	trimmed := strings.TrimSpace(raw)
+	masked := ""
+
+	switch {
+	case trimmed == "":
+		masked = ""
+	case len(trimmed) <= 8:
+		masked = trimmed
+	default:
+		masked = trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
+	}
+
+	return gin.H{
+		"present":       trimmed != "",
+		"length":        len(trimmed),
+		"masked":        masked,
+		"hasSpaces":     strings.Contains(trimmed, " "),
+		"hasQuotes":     strings.ContainsAny(trimmed, `"'`),
+		"startsWith":    func() string { if len(trimmed) >= 4 { return trimmed[:4] }; return trimmed }(),
+		"endsWith":      func() string { if len(trimmed) >= 4 { return trimmed[len(trimmed)-4:] }; return trimmed }(),
+	}
+}
+
 func detectAuthSource(stored services.StoredAuth, storedErr error) string {
 	if strings.TrimSpace(os.Getenv("SERVICE_TOKEN")) != "" ||
 		strings.TrimSpace(os.Getenv("USER_ID")) != "" ||
@@ -226,6 +250,32 @@ func main() {
 			"storedHasUserID":  stored.UserID != "",
 			"storedHasChatbot": stored.XiaomiChatbot != "",
 			"selectedPh":       auth.Ph,
+		})
+	})
+
+	r.GET("/auth/debug", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+
+		serviceToken := os.Getenv("SERVICE_TOKEN")
+		userID := os.Getenv("USER_ID")
+		chatbotPH := os.Getenv("XIAOMI_CHATBOT_PH")
+
+		auth, authErr := services.GetSelectedAuth()
+		c.JSON(http.StatusOK, gin.H{
+			"configured": authErr == nil,
+			"authError":  errString(authErr),
+			"env": gin.H{
+				"SERVICE_TOKEN":     maskValue(serviceToken),
+				"USER_ID":           maskValue(userID),
+				"XIAOMI_CHATBOT_PH": maskValue(chatbotPH),
+			},
+			"selectedAuth": gin.H{
+				"token": maskValue(auth.Token),
+				"userID": maskValue(auth.UserID),
+				"ph":    maskValue(auth.Ph),
+			},
 		})
 	})
 

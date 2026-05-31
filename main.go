@@ -525,8 +525,6 @@ func main() {
 
 	// Mount chat routes
 	routes.RegisterChatRoutes(r, middleware.ValidateApiKey())
-	routes.RegisterAgentRoutes(r)
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "3000"

@@ -10,7 +10,6 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,92 +28,11 @@ import (
 )
 
 var (
-	TokenStats       = make(map[string]int)
-	TokenUsageStats  = make(map[string]int)
-	ResponseTimes    = make([]int64, 0)
-	StatsMutex       sync.Mutex
+	TokenStats      = make(map[string]int)
+	TokenUsageStats = make(map[string]int)
+	ResponseTimes   = make([]int64, 0)
+	StatsMutex      sync.Mutex
 )
-
-type completionRequest struct {
-	Messages    []models.Message     `json:"messages"`
-	Model       string               `json:"model"`
-	Stream      bool                 `json:"stream"`
-	User        string               `json:"user"`
-	Tools       []models.Tool        `json:"tools"`
-	WebSearch   bool                 `json:"web_search"`
-	MultiMedias []models.MultiMedia  `json:"multi_medias"`
-	Prompt      interface{}          `json:"prompt"`
-	Input       interface{}          `json:"input"`
-}
-
-func (r *completionRequest) normalizeMessages() {
-	if len(r.Messages) > 0 {
-		return
-	}
-
-	promptText := normalizeLegacyPrompt(r.Prompt)
-	if promptText == "" {
-		promptText = normalizeLegacyPrompt(r.Input)
-	}
-	if promptText == "" {
-		return
-	}
-
-	r.Messages = []models.Message{
-		{
-			Role:    "user",
-			Content: promptText,
-		},
-	}
-}
-
-func normalizeLegacyPrompt(raw interface{}) string {
-	switch v := raw.(type) {
-	case nil:
-		return ""
-	case string:
-		return strings.TrimSpace(v)
-	case []interface{}:
-		parts := make([]string, 0, len(v))
-		for _, item := range v {
-			text := normalizeLegacyPrompt(item)
-			if text != "" {
-				parts = append(parts, text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(b))
-	}
-}
-
-func isLegacyCompletionsPath(c *gin.Context) bool {
-	return c.FullPath() == "/v1/completions"
-}
-
-func writeLegacyCompletionChunk(c *gin.Context, completionID, model, text string, finishReason *string, usage *models.Usage) {
-	chunk := models.CompletionResponse{
-		ID:      "cmpl-" + completionID,
-		Object:  "text_completion",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []models.CompletionChoice{
-			{
-				Text:         text,
-				Index:        0,
-				Logprobs:     nil,
-				FinishReason: finishReason,
-			},
-		},
-		Usage: usage,
-	}
-	b, _ := json.Marshal(chunk)
-	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
-}
 
 func AddResponseTime(t int64) {
 	StatsMutex.Lock()
@@ -135,28 +53,30 @@ func IncrementTokenStat(token string, tokens int) {
 func GetStats() (map[string]int, map[string]int, []int64) {
 	StatsMutex.Lock()
 	defer StatsMutex.Unlock()
-	// Return copies
+
 	stats := make(map[string]int)
 	for k, v := range TokenStats {
 		stats[k] = v
 	}
+
 	usage := make(map[string]int)
 	for k, v := range TokenUsageStats {
 		usage[k] = v
 	}
+
 	times := make([]int64, len(ResponseTimes))
 	copy(times, ResponseTimes)
 	return stats, usage, times
 }
 
 func sendMimoChatRequest(auth models.Auth, payload models.MimoPayload, customHeaders map[string]string, completionID string) (*http.Response, error) {
-	url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
+	requestURL := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
 
 	payloadBytes, _ := json.Marshal(payload)
 	fmt.Printf("[%s] Chat Request: %d bytes | Model: %s | Media: %d\n",
 		completionID, len(payloadBytes), payload.ModelConfig.Model, len(payload.MultiMedias))
 
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
+	req, _ := http.NewRequest("POST", requestURL, bytes.NewBuffer(payloadBytes))
 	headers := services.GetOfficialHeaders(auth, customHeaders)
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -178,13 +98,11 @@ func RegisterChatRoutes(r *gin.Engine, authMiddleware gin.HandlerFunc) {
 	if authMiddleware != nil {
 		v1.Use(authMiddleware)
 	}
-	
+
 	{
 		v1.GET("/models", handleModels)
-		v1.POST("/completions", handleChatCompletions)
 		v1.POST("/chat/completions", handleChatCompletions)
 		v1.GET("/chat/history/:conversationId", handleGetHistory)
-		v1.POST("/files", handleFileUpload)
 	}
 
 	r.POST("/open-apis/bot/chat", handleDirectProxy)
@@ -201,14 +119,17 @@ func handleModels(c *gin.Context) {
 		c.JSON(http.StatusOK, cached)
 		return
 	}
-	headers := services.GetOfficialHeaders(auth, nil)
 
+	headers := services.GetOfficialHeaders(auth, nil)
 	req, _ := http.NewRequest("GET", "https://aistudio.xiaomimimo.com/open-apis/bot/config", nil)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 
 	resp, err := services.GlobalHTTPClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+	}
 	if err == nil && resp.StatusCode == http.StatusOK {
 		var result struct {
 			Code int `json:"code"`
@@ -223,10 +144,10 @@ func handleModels(c *gin.Context) {
 			modelsList := make([]map[string]interface{}, 0)
 			for _, m := range result.Data.ModelConfigList {
 				modelsList = append(modelsList, map[string]interface{}{
-					"id":       m.Model,
-					"object":   "model",
-					"created":  1700000000,
-					"owned_by": "xiaomi",
+					"id":          m.Model,
+					"object":      "model",
+					"created":     1700000000,
+					"owned_by":    "xiaomi",
 					"description": m.EnIntro,
 				})
 			}
@@ -237,8 +158,9 @@ func handleModels(c *gin.Context) {
 		}
 	}
 
-	// If API fails and no cache, return empty list or error
-	c.JSON(http.StatusOK, gin.H{"object": "list", "data": []interface{}{}})
+	c.JSON(http.StatusOK, gin.H{"object": "list", "data": []map[string]interface{}{
+		{"id": "mimo-v2.5-pro", "object": "model", "created": 1700000000, "owned_by": "xiaomi"},
+	}})
 }
 
 func handleDirectProxy(c *gin.Context) {
@@ -248,11 +170,11 @@ func handleDirectProxy(c *gin.Context) {
 		return
 	}
 
-	url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
+	requestURL := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
 
 	body, _ := io.ReadAll(c.Request.Body)
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	
+	req, _ := http.NewRequest("POST", requestURL, bytes.NewBuffer(body))
+
 	customHeaders := make(map[string]string)
 	for k, v := range c.Request.Header {
 		customHeaders[strings.ToLower(k)] = v[0]
@@ -271,7 +193,7 @@ func handleDirectProxy(c *gin.Context) {
 
 	respBody, _ := io.ReadAll(resp.Body)
 	var result interface{}
-	json.Unmarshal(respBody, &result)
+	_ = json.Unmarshal(respBody, &result)
 	c.JSON(resp.StatusCode, result)
 }
 
@@ -288,27 +210,25 @@ func handleGetHistory(c *gin.Context) {
 	var err error
 
 	if syncParam {
-		auth, err := services.GetSelectedAuth()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid Xiaomi auth configuration", "details": err.Error()})
+		auth, authErr := services.GetSelectedAuth()
+		if authErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid Xiaomi auth configuration", "details": authErr.Error()})
 			return
 		}
+
 		history, err := services.GetConversationHistory(auth, conversationID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch history", "details": err.Error()})
 			return
 		}
 
-		// Convert to OpenAI-like format and SAVE to local DB
 		for _, item := range history {
-			// User message
 			messages = append(messages, models.Message{
 				Role:    "user",
 				Content: item.InputInfo.Query,
 			})
 			services.SaveMessage(conversationID, item.MsgID+"_u", "user", item.InputInfo.Query)
 
-			// Assistant message
 			if len(item.DialogLogDetailList) > 0 {
 				messages = append(messages, models.Message{
 					Role:    "assistant",
@@ -318,20 +238,19 @@ func handleGetHistory(c *gin.Context) {
 			}
 		}
 	} else {
-		// Try local first
 		messages, err = services.GetLocalHistory(conversationID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get local history", "details": err.Error()})
 			return
 		}
 
-		// If empty local, fallback to sync automatically
 		if len(messages) == 0 {
-			auth, err := services.GetSelectedAuth()
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid Xiaomi auth configuration", "details": err.Error()})
+			auth, authErr := services.GetSelectedAuth()
+			if authErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid Xiaomi auth configuration", "details": authErr.Error()})
 				return
 			}
+
 			history, _ := services.GetConversationHistory(auth, conversationID)
 			for _, item := range history {
 				messages = append(messages, models.Message{Role: "user", Content: item.InputInfo.Query})
@@ -351,147 +270,9 @@ func handleGetHistory(c *gin.Context) {
 	})
 }
 
-func processAutoUploads(messages []models.Message, auth models.Auth) []models.MultiMedia {
-	var medias []models.MultiMedia
-
-	if len(messages) == 0 {
-		return medias
-	}
-
-	// Only process the last message to avoid re-uploading and re-referencing 
-	// attachments from previous turns in the history.
-	msg := messages[len(messages)-1]
-
-	contentArray, ok := msg.Content.([]interface{})
-	if !ok {
-		return medias
-	}
-
-	for _, item := range contentArray {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		mType, _ := m["type"].(string)
-		var data []byte
-		var fileName string
-		var mediaType string
-
-		if mType == "image_url" {
-			urlInfo, _ := m["image_url"].(map[string]interface{})
-			url, _ := urlInfo["url"].(string)
-			if url == "" {
-				continue
-			}
-
-			if strings.HasPrefix(url, "data:image/") {
-				// Base64
-				parts := strings.SplitN(url, ",", 2)
-				if len(parts) != 2 {
-					continue
-				}
-				decoded, err := base64.StdEncoding.DecodeString(parts[1])
-				if err != nil {
-					continue
-				}
-				data = decoded
-				
-				// Guess extension from mime type
-				mime := strings.TrimPrefix(strings.Split(parts[0], ";")[0], "data:")
-				ext := "png"
-				if strings.Contains(mime, "/") {
-					ext = strings.Split(mime, "/")[1]
-				}
-				fileName = fmt.Sprintf("upload_%d.%s", time.Now().UnixNano(), ext)
-				mediaType = "image"
-			} else if strings.HasPrefix(url, "http") {
-				// External URL
-				resp, err := http.Get(url)
-				if err != nil {
-					continue
-				}
-				defer resp.Body.Close()
-				data, _ = io.ReadAll(resp.Body)
-				fileName = fmt.Sprintf("url_upload_%d.png", time.Now().UnixNano())
-				mediaType = "image"
-			}
-		} else if mType == "input_audio" {
-			audioInfo, _ := m["input_audio"].(map[string]interface{})
-			audioData, _ := audioInfo["data"].(string)
-			if audioData != "" {
-				decoded, err := base64.StdEncoding.DecodeString(audioData)
-				if err != nil {
-					continue
-				}
-				data = decoded
-				fileName = fmt.Sprintf("audio_%d.webm", time.Now().UnixNano())
-				mediaType = "audio"
-			}
-		}
-
-		if len(data) > 0 {
-			result, err := services.UploadToXiaomi(auth, fileName, data, mediaType)
-			if err == nil && result != nil {
-				medias = append(medias, *result)
-			}
-		}
-	}
-
-	return medias
-}
-
-func handleFileUpload(c *gin.Context) {
-	file, err := c.FormFile("file")
-	if err != nil {
-		utils.SendError(c, http.StatusBadRequest, "No file uploaded", "invalid_request_error", nil)
-		return
-	}
-
-	f, err := file.Open()
-	if err != nil {
-		utils.SendError(c, http.StatusInternalServerError, "Failed to open file", "server_error", nil)
-		return
-	}
-	defer f.Close()
-
-	fileData, err := io.ReadAll(f)
-	if err != nil {
-		utils.SendError(c, http.StatusInternalServerError, "Failed to read file", "server_error", nil)
-		return
-	}
-
-	// Determine mediaType
-	mediaType := "file"
-	// Simpler extension check
-	if strings.Contains(file.Header.Get("Content-Type"), "image") {
-		mediaType = "image"
-	} else if strings.Contains(file.Header.Get("Content-Type"), "audio") || strings.HasSuffix(strings.ToLower(file.Filename), ".webm") {
-		mediaType = "audio"
-	} else if strings.Contains(file.Header.Get("Content-Type"), "video") {
-		mediaType = "video"
-	}
-
-	auth, err := services.GetSelectedAuth()
-	if err != nil {
-		fmt.Printf("Invalid Xiaomi auth configuration during file upload: %v\n", err)
-		utils.SendError(c, http.StatusInternalServerError, "Invalid Xiaomi auth configuration", "server_error", nil)
-		return
-	}
-	result, err := services.UploadToXiaomi(auth, file.Filename, fileData, mediaType)
-	if err != nil {
-		utils.SendError(c, http.StatusInternalServerError, "Failed to upload to Xiaomi", "server_error", nil)
-		fmt.Printf("Upload error: %v\n", err)
-		return
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
 func handleChatCompletions(c *gin.Context) {
 	completionID := utils.GenerateID()
-	
-	// Request caching/de-duplication
+
 	bodyCopy, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		fmt.Printf("Error reading request body: %v\n", err)
@@ -514,14 +295,19 @@ func handleChatCompletions(c *gin.Context) {
 		}
 	}
 
-	var input completionRequest
+	var input struct {
+		Messages  []models.Message `json:"messages"`
+		Model     string           `json:"model"`
+		Stream    bool             `json:"stream"`
+		User      string           `json:"user"`
+		Tools     []models.Tool    `json:"tools"`
+		WebSearch bool             `json:"web_search"`
+	}
 
 	if err = c.ShouldBindJSON(&input); err != nil {
 		utils.SendError(c, http.StatusBadRequest, "Invalid request body", "invalid_request_error", nil)
 		return
 	}
-
-	input.normalizeMessages()
 
 	if len(input.Messages) == 0 {
 		utils.SendError(c, http.StatusBadRequest, "Messages array is required and cannot be empty", "invalid_request_error", nil)
@@ -530,14 +316,11 @@ func handleChatCompletions(c *gin.Context) {
 
 	toolInstructions := utils.FormatToolsAsInstructions(input.Tools)
 
-	// Check for pending tool calls in cache (Sequential Tool Calling)
 	if input.User != "" {
 		if pending, found := services.GlobalCache.Get("pending_tools_" + input.User); found {
 			if pendingTools, ok := pending.([]models.ToolCall); ok && len(pendingTools) > 0 {
-				// The last message should be a tool result
 				lastMsg := input.Messages[len(input.Messages)-1]
 				if lastMsg.Role == "tool" {
-					// Return the next tool call from cache
 					nextTool := pendingTools[0]
 					remaining := pendingTools[1:]
 					if len(remaining) > 0 {
@@ -546,12 +329,12 @@ func handleChatCompletions(c *gin.Context) {
 						services.GlobalCache.Delete("pending_tools_" + input.User)
 					}
 
-						response := models.ChatCompletionChunk{
-							ID:      "chatcmpl-" + completionID,
-							Object:  "chat.completion.chunk",
-							Created: time.Now().Unix(),
-							Model:   input.Model,
-							Choices: []models.Choice{
+					response := models.ChatCompletionChunk{
+						ID:      "chatcmpl-" + completionID,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   input.Model,
+						Choices: []models.Choice{
 							{
 								Index: 0,
 								Delta: models.Delta{
@@ -565,47 +348,49 @@ func handleChatCompletions(c *gin.Context) {
 
 					if input.Stream {
 						c.Header("Content-Type", "text/event-stream")
-						// Initial role
+
 						roleChunk := response
 						roleChunk.Choices[0].Delta = models.Delta{Role: "assistant"}
 						roleChunk.Choices[0].FinishReason = nil
 						b1, _ := json.Marshal(roleChunk)
 						c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b1)))
-						
-						// Tool call
+
 						b2, _ := json.Marshal(response)
 						c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b2)))
 						c.Writer.WriteString("data: [DONE]\n\n")
 						c.Writer.Flush()
 						return
-					} else {
-						// Non-stream OpenAI format
-						type NonStreamChoice struct {
-							Index        int            `json:"index"`
-							Message      models.Delta   `json:"message"`
-							FinishReason *string        `json:"finish_reason"`
-						}
-						type NonStreamResponse struct {
-							ID      string             `json:"id"`
-							Object  string             `json:"object"`
-							Created int64              `json:"created"`
-							Model   string             `json:"model"`
-							Choices []NonStreamChoice  `json:"choices"`
-						}
-						ns := NonStreamResponse{
-							ID:      response.ID,
-							Object:  response.Object,
-							Created: response.Created,
-							Model:   response.Model,
-							Choices: []NonStreamChoice{{Index: 0, Message: response.Choices[0].Delta, FinishReason: response.Choices[0].FinishReason}},
-						}
-						c.JSON(http.StatusOK, ns)
-						return
 					}
-				} else {
-					// User sent a new message, clear pending tools
-					services.GlobalCache.Delete("pending_tools_" + input.User)
+
+					type nonStreamChoice struct {
+						Index        int          `json:"index"`
+						Message      models.Delta `json:"message"`
+						FinishReason *string      `json:"finish_reason"`
+					}
+					type nonStreamResponse struct {
+						ID      string            `json:"id"`
+						Object  string            `json:"object"`
+						Created int64             `json:"created"`
+						Model   string            `json:"model"`
+						Choices []nonStreamChoice `json:"choices"`
+					}
+
+					ns := nonStreamResponse{
+						ID:      response.ID,
+						Object:  "chat.completion",
+						Created: response.Created,
+						Model:   response.Model,
+						Choices: []nonStreamChoice{{
+							Index:        0,
+							Message:      response.Choices[0].Delta,
+							FinishReason: response.Choices[0].FinishReason,
+						}},
+					}
+					c.JSON(http.StatusOK, ns)
+					return
 				}
+
+				services.GlobalCache.Delete("pending_tools_" + input.User)
 			}
 		}
 	}
@@ -613,7 +398,6 @@ func handleChatCompletions(c *gin.Context) {
 	var query string
 	convID := input.User
 
-	// Simpler session detection from the first build.
 	if convID == "" && len(input.Messages) > 0 {
 		firstMsg := input.Messages[0].Role + ":" + services.ExtractText(input.Messages[0].Content, true)
 		if len(firstMsg) > 200 {
@@ -636,7 +420,6 @@ func handleChatCompletions(c *gin.Context) {
 		}
 	}
 
-	// Keep the original first-build conversation behavior.
 	if convID != "" {
 		localMsgs, _ := services.GetLocalHistory(convID)
 		if len(localMsgs) == 0 {
@@ -658,7 +441,7 @@ func handleChatCompletions(c *gin.Context) {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		lastMessageText := utils.FormatMessageForMiMo(lastMessage)
 		services.SaveMessage(convID, "user_"+utils.GenerateID(), "user", lastMessageText)
-		
+
 		var systemContent string
 		for _, m := range input.Messages {
 			if m.Role == "system" {
@@ -674,16 +457,13 @@ func handleChatCompletions(c *gin.Context) {
 		} else {
 			query = lastMessageText
 		}
-		
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		query = utils.FormatMessageForMiMo(lastMessage)
 	} else {
-		// Do not limit history unless it exceeds 1M tokens (~4M characters)
 		var processedMessages []string
 		var systemPrompt string
-		
-		// Find system prompt first
+
 		for _, m := range input.Messages {
 			if m.Role == "system" {
 				systemPrompt = services.ExtractText(m.Content, false) + toolInstructions
@@ -691,7 +471,6 @@ func handleChatCompletions(c *gin.Context) {
 			}
 		}
 
-		// Include all messages except system (which is handled separately)
 		for _, m := range input.Messages {
 			if m.Role == "system" {
 				continue
@@ -701,43 +480,35 @@ func handleChatCompletions(c *gin.Context) {
 
 		if systemPrompt != "" {
 			query = systemPrompt + "\n\n" + strings.Join(processedMessages, "\n\n")
+		} else if toolInstructions != "" {
+			query = strings.TrimSpace(toolInstructions) + "\n\n" + strings.Join(processedMessages, "\n\n")
 		} else {
-			if toolInstructions != "" {
-				query = strings.TrimSpace(toolInstructions) + "\n\n" + strings.Join(processedMessages, "\n\n")
-			} else {
-				query = strings.Join(processedMessages, "\n\n")
-			}
+			query = strings.Join(processedMessages, "\n\n")
 		}
-		
-		// Only truncate if we exceed the safety limit for payload stability
-		// Mimo officially supports 1M tokens (~4M characters)
+
 		maxChars := 4000000
 		if len(query) > maxChars {
-			// Find a safe point to truncate (after the system prompt)
-			// to keep the most recent context.
-			
-			// Take the last portion of the query
 			truncated := query[len(query)-maxChars:]
-			
-			// Try to find the first newline to avoid starting in middle of a word
 			if idx := strings.Index(truncated, "\n"); idx != -1 {
 				truncated = truncated[idx+1:]
 			}
 
-			if systemPrompt != "" && !strings.Contains(truncated, systemPrompt[:10]) {
+			if systemPrompt != "" && len(systemPrompt) >= 10 && !strings.Contains(truncated, systemPrompt[:10]) {
 				query = systemPrompt + "\n\n... (context truncated) ...\n\n" + truncated
 			} else {
 				query = truncated
 			}
 
-			// Final safety check
 			if len(query) > 4100000 {
 				query = query[:4100000]
 			}
 		}
 	}
 
-	targetModel := input.Model
+	targetModel := strings.TrimSpace(input.Model)
+	if targetModel == "" {
+		targetModel = "mimo-v2.5-pro"
+	}
 
 	enableThinking := !strings.Contains(input.Model, "no-thinking")
 	webSearchStatus := "disabled"
@@ -761,33 +532,29 @@ func handleChatCompletions(c *gin.Context) {
 		payload.ConversationID = utils.GenerateID()
 	}
 
-	// Retry logic for transient upstream failures using the configured env credentials.
 	maxRetries := 3
-
 	var resp *http.Response
-	var auth models.Auth
+
 	customHeaders := make(map[string]string)
 	for k, v := range c.Request.Header {
 		customHeaders[strings.ToLower(k)] = v[0]
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		auth, err = services.GetSelectedAuth()
-		if err != nil {
-			fmt.Printf("Invalid Xiaomi auth configuration during chat request: %v\n", err)
+		auth, authErr := services.GetSelectedAuth()
+		if authErr != nil {
 			utils.SendError(c, http.StatusInternalServerError, "Invalid Xiaomi auth configuration", "server_error", nil)
 			return
 		}
+
 		resp, err = sendMimoChatRequest(auth, payload, customHeaders, completionID)
 		if err == nil {
 			if resp.StatusCode != http.StatusOK {
 				fmt.Printf("Xiaomi returned non-200 status: %d\n", resp.StatusCode)
-				// If not 200, we might want to retry or just fail
 				if resp.StatusCode >= 500 {
 					resp.Body.Close()
 					continue
 				}
-				// For 4xx, just report it
 				defer resp.Body.Close()
 				body, _ := io.ReadAll(resp.Body)
 				c.JSON(resp.StatusCode, gin.H{"error": "Xiaomi API error", "status": resp.StatusCode, "details": string(body)})
@@ -795,7 +562,7 @@ func handleChatCompletions(c *gin.Context) {
 			}
 			break
 		}
-		
+
 		fmt.Printf("Error calling Xiaomi (retry %d): %v\n", i, err)
 		if i == maxRetries-1 {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to proxy request", "details": err.Error()})
@@ -804,7 +571,6 @@ func handleChatCompletions(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Handle potential Gzip response from Xiaomi
 	var bodyReader io.Reader = resp.Body
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		gz, err := gzip.NewReader(resp.Body)
@@ -818,35 +584,33 @@ func handleChatCompletions(c *gin.Context) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		if !isLegacyCompletionsPath(c) {
-			// Send initial role chunk only for chat-completions compatibility.
-			initialChunk := models.ChatCompletionChunk{
-				ID:      "chatcmpl-" + completionID,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   targetModel,
-				Choices: []models.Choice{
-					{
-						Index: 0,
-						Delta: models.Delta{Role: "assistant"},
-					},
-				},
-			}
-			initialBytes, _ := json.Marshal(initialChunk)
-			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
-			c.Writer.Flush()
-		}
 
-		processStream(c, bodyReader, completionID, targetModel, payload.ConversationID, query, input.Tools, isLegacyCompletionsPath(c))
-	} else {
-		processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools, isLegacyCompletionsPath(c))
+		initialChunk := models.ChatCompletionChunk{
+			ID:      "chatcmpl-" + completionID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   targetModel,
+			Choices: []models.Choice{
+				{
+					Index: 0,
+					Delta: models.Delta{Role: "assistant"},
+				},
+			},
+		}
+		initialBytes, _ := json.Marshal(initialChunk)
+		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
+		c.Writer.Flush()
+
+		processStream(c, bodyReader, completionID, targetModel, payload.ConversationID, query, input.Tools)
+		return
 	}
+
+	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools)
 }
 
-func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, availableTools []models.Tool, legacyCompletions bool) {
-	// Use a very large buffer for the reader to handle massive SSE events
-	reader := bufio.NewReaderSize(body, 16*1024*1024) // 16MB buffer
-	
+func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, availableTools []models.Tool) {
+	reader := bufio.NewReaderSize(body, 16*1024*1024)
+
 	var inThinking bool
 	var inToolCall bool
 	var sentToolCallName bool
@@ -856,7 +620,6 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	var fullText strings.Builder
 	var reasoningText strings.Builder
 	var usage models.Usage
-
 	var eventType string
 
 	for {
@@ -867,7 +630,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 			}
 			break
 		}
-		
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -879,7 +642,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 		}
 		if strings.HasPrefix(line, "data:") {
 			dataStr := strings.TrimSpace(line[5:])
-			processEvent(c, eventType, dataStr, completionID, model, true, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
+			processEvent(c, eventType, dataStr, completionID, model, true, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
 			eventType = ""
 		}
 	}
@@ -888,34 +651,29 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	if len(availableTools) > 0 {
 		_, toolCalls = utils.ParseToolCalls(fullText.String())
 	}
+
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
 	}
 
-	// Ensure usage is at least estimated if missing
 	if usage.TotalTokens == 0 {
 		usage.PromptTokens = len(query) / 4
 		usage.CompletionTokens = len(fullText.String()) / 4
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
-	IncrementTokenStat(os.Getenv("SERVICE_TOKEN"), usage.TotalTokens) // Use first token or specific one
+	IncrementTokenStat(os.Getenv("SERVICE_TOKEN"), usage.TotalTokens)
 
-	// Save assistant message to local history
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", fullText.String())
 
-	if legacyCompletions {
-		writeLegacyCompletionChunk(c, completionID, model, "", &finishReason, &usage)
-	} else {
-		finalChunk := utils.CreateChatCompletionChunk(completionID, "", model, &finishReason, "", &usage, nil)
-		finalBytes, _ := json.Marshal(finalChunk)
-		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(finalBytes)))
-	}
+	finalChunk := utils.CreateChatCompletionChunk(completionID, "", model, &finishReason, "", &usage, nil)
+	finalBytes, _ := json.Marshal(finalChunk)
+	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(finalBytes)))
 	c.Writer.WriteString("data: [DONE]\n\n")
 	c.Writer.Flush()
 }
 
-func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool, legacyCompletions bool) {
+func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool) {
 	respBody, _ := io.ReadAll(body)
 	events := strings.Split(string(respBody), "\n\n")
 
@@ -933,6 +691,7 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		if strings.TrimSpace(event) == "" {
 			continue
 		}
+
 		lines := strings.Split(event, "\n")
 		var eventType string
 		var dataStr string
@@ -944,7 +703,7 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 			}
 		}
 		if dataStr != "" {
-			processEvent(c, eventType, dataStr, completionID, model, false, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
+			processEvent(c, eventType, dataStr, completionID, model, false, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
 		}
 	}
 
@@ -959,13 +718,11 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		finishReason = "tool_calls"
 		cleanText = ""
 		reasoningText.Reset()
-		// If multi-tool and we have a user ID, store the rest in cache
 		if userID != "" && len(toolCalls) > 1 {
 			services.GlobalCache.Set("pending_tools_"+userID, toolCalls[1:], 10*time.Minute)
 		}
 	}
 
-	// Ensure usage is at least estimated if missing
 	if usage.TotalTokens == 0 {
 		usage.PromptTokens = len(query) / 4
 		usage.CompletionTokens = fullText.Len() / 4
@@ -973,15 +730,29 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 	}
 	IncrementTokenStat(os.Getenv("SERVICE_TOKEN"), usage.TotalTokens)
 
-	response := models.ChatCompletionChunk{
+	type nonStreamChoice struct {
+		Index        int          `json:"index"`
+		Message      models.Delta `json:"message"`
+		FinishReason *string      `json:"finish_reason"`
+	}
+	type nonStreamResponse struct {
+		ID      string            `json:"id"`
+		Object  string            `json:"object"`
+		Created int64             `json:"created"`
+		Model   string            `json:"model"`
+		Choices []nonStreamChoice `json:"choices"`
+		Usage   *models.Usage     `json:"usage"`
+	}
+
+	response := nonStreamResponse{
 		ID:      "chatcmpl-" + completionID,
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   model,
-		Choices: []models.Choice{
+		Choices: []nonStreamChoice{
 			{
 				Index: 0,
-				Delta: models.Delta{
+				Message: models.Delta{
 					Role:             "assistant",
 					Content:          cleanText,
 					ReasoningContent: strings.TrimSpace(reasoningText.String()),
@@ -993,63 +764,9 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		Usage: &usage,
 	}
 
-	// Fix Choice for non-streaming: OpenAI uses 'message' instead of 'delta'
-	type NonStreamChoice struct {
-		Index        int            `json:"index"`
-		Message      models.Delta   `json:"message"`
-		FinishReason *string        `json:"finish_reason"`
-	}
-	type NonStreamResponse struct {
-		ID      string             `json:"id"`
-		Object  string             `json:"object"`
-		Created int64              `json:"created"`
-		Model   string             `json:"model"`
-		Choices []NonStreamChoice  `json:"choices"`
-		Usage   *models.Usage      `json:"usage"`
-	}
-
-	nsResponse := NonStreamResponse{
-		ID:      response.ID,
-		Object:  response.Object,
-		Created: response.Created,
-		Model:   response.Model,
-		Choices: []NonStreamChoice{
-			{
-				Index: 0,
-				Message: response.Choices[0].Delta,
-				FinishReason: response.Choices[0].FinishReason,
-			},
-		},
-		Usage: response.Usage,
-	}
-
-	// Save assistant message to local history
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", fullText.String())
-
-	if legacyCompletions {
-		legacyResponse := models.CompletionResponse{
-			ID:      "cmpl-" + completionID,
-			Object:  "text_completion",
-			Created: time.Now().Unix(),
-			Model:   model,
-			Choices: []models.CompletionChoice{
-				{
-					Text:         cleanText,
-					Index:        0,
-					Logprobs:     nil,
-					FinishReason: &finishReason,
-				},
-			},
-			Usage: &usage,
-		}
-		services.GlobalCache.Set(cacheKey, legacyResponse, 5*time.Minute)
-		c.JSON(http.StatusOK, legacyResponse)
-		return
-	}
-
-	// Cache successful non-streaming response
-	services.GlobalCache.Set(cacheKey, nsResponse, 5*time.Minute)
-	c.JSON(http.StatusOK, nsResponse)
+	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
+	c.JSON(http.StatusOK, response)
 }
 
 var (
@@ -1058,7 +775,7 @@ var (
 	reTrailingBrace = regexp.MustCompile(`\s*}$`)
 )
 
-func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, legacyCompletions bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
+func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
 	if eventType == "usage" {
 		var u struct {
 			PromptTokens     int `json:"promptTokens"`
@@ -1122,7 +839,10 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 				}
 				remaining = ""
 			}
-		} else if *inToolCall {
+			continue
+		}
+
+		if *inToolCall {
 			endIdx := strings.Index(remaining, "</tool_call>")
 			contentToProcess := remaining
 			if endIdx != -1 {
@@ -1131,7 +851,7 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 
 			toolCallBuffer.WriteString(contentToProcess)
 
-			if isStreaming && !legacyCompletions {
+			if isStreaming {
 				if !*sentToolCallName {
 					bufferStr := toolCallBuffer.String()
 					nameMatch := reToolName.FindStringSubmatch(bufferStr)
@@ -1213,71 +933,48 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 			} else {
 				remaining = ""
 			}
-		} else {
-			thinkStartIdx := strings.Index(remaining, "<think>")
-			toolStartIdx := strings.Index(remaining, "<tool_call>")
+			continue
+		}
 
-			if thinkStartIdx != -1 && (toolStartIdx == -1 || thinkStartIdx < toolStartIdx) {
-				text := remaining[:thinkStartIdx]
-				fullText.WriteString(text)
-				if isStreaming && text != "" {
-					chunk := utils.CreateChatCompletionChunk(completionID, text, model, nil, "", nil, nil)
-					b, _ := json.Marshal(chunk)
-					c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
-					c.Writer.Flush()
-				}
-				*inThinking = true
-				remaining = remaining[thinkStartIdx+7:]
-			} else if toolStartIdx != -1 {
-				text := remaining[:toolStartIdx]
-				fullText.WriteString(text)
-				if isStreaming && text != "" {
-					chunk := utils.CreateChatCompletionChunk(completionID, text, model, nil, "", nil, nil)
-					b, _ := json.Marshal(chunk)
-					c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
-					c.Writer.Flush()
-				}
-				*inToolCall = true
-				toolCallBuffer.Reset()
-				remaining = remaining[toolStartIdx+11:]
-			} else {
-				fullText.WriteString(remaining)
-				if isStreaming {
-					chunk := utils.CreateChatCompletionChunk(completionID, remaining, model, nil, "", nil, nil)
-					b, _ := json.Marshal(chunk)
-					c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
-					c.Writer.Flush()
-				}
-				remaining = ""
+		thinkStartIdx := strings.Index(remaining, "<think>")
+		toolStartIdx := strings.Index(remaining, "<tool_call>")
+
+		if thinkStartIdx != -1 && (toolStartIdx == -1 || thinkStartIdx < toolStartIdx) {
+			text := remaining[:thinkStartIdx]
+			fullText.WriteString(text)
+			if isStreaming && text != "" {
+				chunk := utils.CreateChatCompletionChunk(completionID, text, model, nil, "", nil, nil)
+				b, _ := json.Marshal(chunk)
+				c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+				c.Writer.Flush()
 			}
+			*inThinking = true
+			remaining = remaining[thinkStartIdx+7:]
+			continue
 		}
-	}
-}
 
-func updateConversationFailStats(userID string, fullText string) {
-	if userID == "" {
-		return
-	}
-	
-	failCountKey := "fail_count_" + userID
-	needsRebootKey := "needs_reboot_" + userID
-	
-	if len(strings.TrimSpace(fullText)) == 0 {
-		count := 0
-		if val, found := services.GlobalCache.Get(failCountKey); found {
-			count = val.(int)
+		if toolStartIdx != -1 {
+			text := remaining[:toolStartIdx]
+			fullText.WriteString(text)
+			if isStreaming && text != "" {
+				chunk := utils.CreateChatCompletionChunk(completionID, text, model, nil, "", nil, nil)
+				b, _ := json.Marshal(chunk)
+				c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+				c.Writer.Flush()
+			}
+			*inToolCall = true
+			toolCallBuffer.Reset()
+			remaining = remaining[toolStartIdx+11:]
+			continue
 		}
-		count++
-		services.GlobalCache.Set(failCountKey, count, 24*time.Hour)
-		fmt.Printf("Consecutive empty responses for %s: %d\n", userID, count)
-		
-		if count >= 3 {
-			services.GlobalCache.Set(needsRebootKey, true, 24*time.Hour)
-			fmt.Printf("Session %s flagged for reboot due to 3+ failures\n", userID)
+
+		fullText.WriteString(remaining)
+		if isStreaming {
+			chunk := utils.CreateChatCompletionChunk(completionID, remaining, model, nil, "", nil, nil)
+			b, _ := json.Marshal(chunk)
+			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+			c.Writer.Flush()
 		}
-	} else {
-		// Reset counter on success
-		services.GlobalCache.Delete(failCountKey)
-		services.GlobalCache.Delete(needsRebootKey)
+		remaining = ""
 	}
 }

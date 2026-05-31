@@ -472,50 +472,30 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	var query string
-	convID := strings.TrimSpace(input.User)
-
-	if convID == "" && sessionHandle != "" {
-		if cachedID, found := services.GlobalCache.Get(sessionHandle); found {
-			convID = cachedID.(string)
-			fmt.Printf("Detected existing session via fingerprint: %s\n", convID)
-		} else if storedID, err := services.GetSession(sessionHandle); err == nil && storedID != "" {
-			convID = storedID
-			services.GlobalCache.Set(sessionHandle, convID, 24*time.Hour)
-			fmt.Printf("Detected existing session via database fingerprint: %s\n", convID)
-		} else {
-			convID = utils.GenerateID()
-			services.GlobalCache.Set(sessionHandle, convID, 24*time.Hour)
-			_ = services.SaveSession(sessionHandle, convID)
-			auth, authErr := services.GetSelectedAuth()
-			if authErr == nil {
-				if err := services.CreateConversation(auth, convID); err != nil {
-					fmt.Printf("Failed to register conversation with Xiaomi: %v\n", err)
-				}
-			}
-			fmt.Printf("Started and registered new session for fingerprint: %s\n", convID)
-		}
+	historyID := sessionHandle
+	if historyID == "" {
+		historyID = utils.GenerateID()
 	}
 
-	if convID != "" {
-		localMsgs, _ := services.GetLocalHistory(convID)
-		if len(localMsgs) == 0 {
-			auth, authErr := services.GetSelectedAuth()
-			if authErr == nil {
-				_ = services.CreateConversation(auth, convID)
-				remoteHistory, err := services.GetConversationHistory(auth, convID)
-				if err == nil && len(remoteHistory) > 0 {
-					for _, item := range remoteHistory {
-						services.SaveMessage(convID, item.MsgID+"_u", "user", item.InputInfo.Query)
-						if len(item.DialogLogDetailList) > 0 {
-							services.SaveMessage(convID, item.MsgID+"_a", "assistant", item.DialogLogDetailList[0].Result)
-						}
-					}
-				}
+	convID := strings.TrimSpace(input.User)
+	if convID == "" {
+		convID = utils.GenerateID()
+		auth, authErr := services.GetSelectedAuth()
+		if authErr == nil {
+			if err := services.CreateConversation(auth, convID); err != nil {
+				fmt.Printf("Failed to register fresh Xiaomi conversation: %v\n", err)
 			}
-			localMsgs, _ = services.GetLocalHistory(convID)
+		}
+		fmt.Printf("Started fresh Xiaomi conversation %s for logical session %s\n", convID, historyID)
+	}
+
+	if historyID != "" {
+		localMsgs, _ := services.GetLocalHistory(historyID)
+		if len(localMsgs) == 0 {
+			localMsgs, _ = services.GetLocalHistory(historyID)
 		}
 
-		syncConversationMessages(convID, input.Messages)
+		syncConversationMessages(historyID, input.Messages)
 		query = buildConversationQuery(input.Messages, toolInstructions)
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
@@ -631,11 +611,11 @@ func handleChatCompletions(c *gin.Context) {
 		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
 		c.Writer.Flush()
 
-		processStream(c, bodyReader, completionID, targetModel, payload.ConversationID, query, input.Tools)
+		processStream(c, bodyReader, completionID, targetModel, historyID, query, input.Tools)
 		return
 	}
 
-	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools)
+	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, input.Tools)
 }
 
 func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, availableTools []models.Tool) {

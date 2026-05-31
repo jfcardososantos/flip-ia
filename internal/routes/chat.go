@@ -386,7 +386,17 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	toolChoice := resolveToolChoice(input.ToolChoice)
-	toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
+	agentMode := len(input.Tools) > 0
+	contextLimits := utils.ContextLimitsFromEnv(agentMode)
+	if agentMode {
+		input.Messages = utils.TrimMessagesForProxy(input.Messages, contextLimits)
+	}
+	var toolInstructions string
+	if agentMode && utils.AgentFastModeEnabled() {
+		toolInstructions = utils.FormatToolsAsInstructionsCompact(input.Tools, toolChoice)
+	} else {
+		toolInstructions = utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
+	}
 	sessionHandle := strings.TrimSpace(input.User)
 	if sessionHandle == "" {
 		sessionHandle = services.GenerateFingerprint(input.Messages)
@@ -484,24 +494,37 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	convID := strings.TrimSpace(input.User)
+	if convID == "" && sessionHandle != "" {
+		if saved, err := services.GetSession(sessionHandle); err == nil && saved != "" {
+			convID = saved
+		}
+	}
 	if convID == "" {
 		convID = utils.GenerateID()
 		auth, authErr := services.GetSelectedAuth()
 		if authErr == nil {
-			if err := services.CreateConversation(auth, convID); err != nil {
-				fmt.Printf("Failed to register fresh Xiaomi conversation: %v\n", err)
-			}
+			go func(a models.Auth, id, fp string) {
+				if err := services.CreateConversation(a, id); err != nil {
+					fmt.Printf("CreateConversation async: %v\n", err)
+					return
+				}
+				if fp != "" {
+					_ = services.SaveSession(fp, id)
+				}
+			}(auth, convID, sessionHandle)
 		}
-		fmt.Printf("Started fresh Xiaomi conversation %s for logical session %s\n", convID, historyID)
+		fmt.Printf("Started Xiaomi conversation %s for session %s\n", convID, historyID)
+	} else if sessionHandle != "" {
+		go func(fp, id string) { _ = services.SaveSession(fp, id) }(sessionHandle, convID)
 	}
 
+	messagesCopy := input.Messages
 	if historyID != "" {
-		localMsgs, _ := services.GetLocalHistory(historyID)
-		if len(localMsgs) == 0 {
-			localMsgs, _ = services.GetLocalHistory(historyID)
+		if agentMode && utils.AgentFastModeEnabled() {
+			go syncConversationMessages(historyID, messagesCopy)
+		} else {
+			syncConversationMessages(historyID, input.Messages)
 		}
-
-		syncConversationMessages(historyID, input.Messages)
 		query = buildConversationQuery(input.Messages, toolInstructions)
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
@@ -518,8 +541,10 @@ func handleChatCompletions(c *gin.Context) {
 				break
 			}
 		}
-		query = truncateConversationQuery(query, systemPrefix, 4000000)
+		query = truncateConversationQuery(query, systemPrefix, contextLimits.MaxChars)
 	}
+	fmt.Printf("[%s] Query size: %d chars | agent=%v | messages=%d\n",
+		completionID, len(query), agentMode, len(input.Messages))
 
 	targetModel := strings.TrimSpace(input.Model)
 	if targetModel == "" {
@@ -557,6 +582,9 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	maxRetries := 3
+	if agentMode {
+		maxRetries = 2
+	}
 	var resp *http.Response
 
 	customHeaders := make(map[string]string)
@@ -629,11 +657,11 @@ func handleChatCompletions(c *gin.Context) {
 		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
 		c.Writer.Flush()
 
-		processStream(c, bodyReader, completionID, targetModel, historyID, query, input.ParallelToolCalls)
+		processStream(c, bodyReader, completionID, targetModel, historyID, query, input.ParallelToolCalls, agentMode)
 		return
 	}
 
-	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, input.ParallelToolCalls, len(input.Tools) == 0)
+	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, input.ParallelToolCalls, len(input.Tools) == 0, agentMode)
 }
 
 func assistantTranscript(content, reasoning string) string {
@@ -717,7 +745,7 @@ func handleCompletions(c *gin.Context) {
 	handleChatCompletions(c)
 }
 
-func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, parallelToolCalls *bool) {
+func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, parallelToolCalls *bool, agentMode bool) {
 	reader := bufio.NewReaderSize(body, 16*1024*1024)
 
 	var inThinking bool
@@ -788,6 +816,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 
 	_, toolCalls := utils.ParseToolCalls(fullText.String())
 	toolCalls = finalizeToolCalls(toolCalls)
+	responseCalls := responseToolCalls(toolCalls, parallelToolCalls, agentMode)
 
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
@@ -803,43 +832,45 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", assistantTranscript(fullText.String(), reasoningText.String()))
 
-	finalToolCalls := []models.ToolCall(nil)
 	if finishReason == "tool_calls" {
-		if !emittedToolCall && len(toolCalls) > 0 {
-			for _, tc := range toolCalls {
+		if !emittedToolCall && len(responseCalls) > 0 {
+			for _, tc := range responseCalls {
 				utils.EmitStreamToolCall(c, completionID, model, tc)
 			}
-		} else if len(toolCalls) > 1 {
-			storePendingToolCalls(userID, toolCalls)
 		}
+		storePendingToolCalls(userID, toolCalls)
 	}
 	streamDone = true
 	utils.FinalizeChatStream(c, completionID, model, finishReason, &usage)
 	if upstreamErr != nil {
 		fmt.Printf("[%s] Stream completed after upstream error: %v\n", completionID, upstreamErr)
 	}
-	_ = finalToolCalls // emitted incrementally above when needed
 }
 
 func finalizeToolCalls(toolCalls []models.ToolCall) []models.ToolCall {
 	return utils.AssignToolCallIndexes(toolCalls)
 }
 
-func responseToolCalls(toolCalls []models.ToolCall, parallelToolCalls *bool) []models.ToolCall {
+func responseToolCalls(toolCalls []models.ToolCall, parallelToolCalls *bool, agentMode bool) []models.ToolCall {
 	if parallelToolCalls != nil && !*parallelToolCalls && len(toolCalls) > 1 {
 		return toolCalls[:1]
+	}
+	if agentMode && !utils.AgentSequentialToolsEnabled() {
+		return toolCalls
 	}
 	return toolCalls
 }
 
 func storePendingToolCalls(sessionID string, toolCalls []models.ToolCall) {
-	if sessionID == "" || len(toolCalls) <= 1 {
-		return
+	if utils.AgentSequentialToolsEnabled() {
+		if sessionID == "" || len(toolCalls) <= 1 {
+			return
+		}
+		services.GlobalCache.Set("pending_tools_"+sessionID, toolCalls[1:], 10*time.Minute)
 	}
-	services.GlobalCache.Set("pending_tools_"+sessionID, toolCalls[1:], 10*time.Minute)
 }
 
-func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, parallelToolCalls *bool, allowResponseCache bool) {
+func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, parallelToolCalls *bool, allowResponseCache bool, agentMode bool) {
 	respBody, _ := io.ReadAll(body)
 	events := strings.Split(string(respBody), "\n\n")
 
@@ -886,7 +917,7 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 	cleanText, toolCalls := utils.ParseToolCalls(fullText.String())
 	cleanText = strings.TrimSpace(cleanText)
 	toolCalls = finalizeToolCalls(toolCalls)
-	responseCalls := responseToolCalls(toolCalls, parallelToolCalls)
+	responseCalls := responseToolCalls(toolCalls, parallelToolCalls, agentMode)
 
 	finishReason := "stop"
 	if len(toolCalls) > 0 {

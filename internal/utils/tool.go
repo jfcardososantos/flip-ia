@@ -73,15 +73,13 @@ func agentToolExecutionRules() string {
 }
 
 // ShouldEnableWebSearch decides when to turn on Xiaomi native web search.
+// Web search adds significant latency; with agent/tools it is opt-in only unless DEFAULT_WEB_SEARCH is set.
 func ShouldEnableWebSearch(model string, webSearchFlag bool, tools []models.Tool) bool {
 	if webSearchFlag || strings.Contains(strings.ToLower(model), "search") {
 		return true
 	}
-	for _, tool := range tools {
-		name := strings.ToLower(tool.Function.Name)
-		if strings.Contains(name, "search") || strings.Contains(name, "web") || strings.Contains(name, "browse") {
-			return true
-		}
+	if len(tools) > 0 {
+		return false
 	}
 	return false
 }

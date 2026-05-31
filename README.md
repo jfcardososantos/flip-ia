@@ -90,6 +90,18 @@ Se o agente planeja (“vou ler o projeto…”) e para sem executar tools:
 
 O proxy agora preserva `reasoning_content` no histórico (exigido pelo Mimo em multi-turn com tools) e corrige o parse das tags `<think>`.
 
+### Performance (agent / Kilo Code)
+
+Com `tools` na requisição, o modo rápido vem **ligado por padrão**:
+
+- Últimas ~20 mensagens + tool results truncados (~6k chars cada)
+- Contexto máximo ~100k chars (antes podia ir a milhões)
+- Web search **desligado** com tools (use `"web_search": true` só quando precisar)
+- `CreateConversation` e sync SQLite em background
+- Várias tool calls de uma vez (sem round-trips extras no proxy)
+
+Ajuste no `.env`: `AGENT_MAX_CONTEXT_CHARS`, `AGENT_MAX_MESSAGES`, `AGENT_MAX_TOOL_RESULT_CHARS`.
+
 ## Setup Assistido
 
 Ao abrir `/`, o proxy mostra:

@@ -32,10 +32,16 @@
             button { background: #7c4f18; color: white; border: none; border-radius: 999px; padding: 0.8rem 1.2rem; cursor: pointer; }
             button.secondary { background: #e9dcc3; color: #5e4626; }
             .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+            .stack { display: flex; flex-direction: column; gap: 0.8rem; }
+            .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
             .note { font-size: 0.95rem; background: #fbf5e8; border-left: 4px solid #c08b36; padding: 0.9rem 1rem; border-radius: 8px; }
+            .response { min-height: 220px; white-space: pre-wrap; overflow: auto; background: #2a2118; color: #f8f2e8; border-radius: 12px; padding: 1rem; font-size: 0.9rem; }
+            .mini { min-height: 56px; }
+            .small { font-size: 0.9rem; }
             @media (max-width: 860px) {
                 body { padding: 1rem; }
                 .hero, .grid { grid-template-columns: 1fr; }
+                .row { grid-template-columns: 1fr; }
                 .qr { width: 200px; height: 200px; }
             }
         </style>
@@ -115,6 +121,121 @@
                     <ul>{{.Stats | safe}}</ul>
                 </div>
             </div>
+
+            <div class="section" style="margin-top: 1.5rem;">
+                <h2>Route Tester</h2>
+                <p class="muted">Teste as rotas direto pela interface. Para endpoints protegidos, informe a mesma <code>API_KEY</code> usada no deploy.</p>
+                <div class="grid">
+                    <div class="stack">
+                        <div class="row">
+                            <input id="apiKey" type="password" placeholder="API_KEY opcional para Authorization: Bearer ..."/>
+                            <input id="chatModel" type="text" value="mimo-v2.5-pro" placeholder="Modelo"/>
+                        </div>
+                        <div class="actions">
+                            <button type="button" onclick="callSimpleRoute('/health')">Test /health</button>
+                            <button type="button" class="secondary" onclick="callSimpleRoute('/auth/status')">Test /auth/status</button>
+                            <button type="button" class="secondary" onclick="callSimpleRoute('/v1/models')">Test /v1/models</button>
+                        </div>
+                        <textarea id="chatPayload">{
+  "model": "mimo-v2.5-pro",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Responda com uma frase curta confirmando que o proxy está funcionando."
+    }
+  ],
+  "stream": false
+}</textarea>
+                        <div class="actions">
+                            <button type="button" onclick="callChatCompletions(false)">Test /v1/chat/completions</button>
+                            <button type="button" class="secondary" onclick="callChatCompletions(true)">Test streaming</button>
+                        </div>
+                        <p class="muted small">Se quiser, edite o JSON acima antes de enviar. O botão de streaming lê os eventos SSE e mostra tudo no painel de resposta.</p>
+                    </div>
+
+                    <div class="stack">
+                        <textarea id="requestInfo" class="mini" readonly>Pronto para testar.</textarea>
+                        <pre id="responsePanel" class="response">A resposta da rota aparece aqui.</pre>
+                    </div>
+                </div>
+            </div>
         </div>
+        <script>
+            function buildHeaders() {
+                const headers = { "Accept": "application/json" };
+                const apiKey = document.getElementById("apiKey").value.trim();
+                if (apiKey) {
+                    headers["Authorization"] = `Bearer ${apiKey}`;
+                }
+                return headers;
+            }
+
+            function setRequestInfo(text) {
+                document.getElementById("requestInfo").value = text;
+            }
+
+            function setResponse(text) {
+                document.getElementById("responsePanel").textContent = text;
+            }
+
+            async function callSimpleRoute(path) {
+                setRequestInfo(`GET ${path}`);
+                setResponse("Carregando...");
+                try {
+                    const res = await fetch(path, { headers: buildHeaders() });
+                    const body = await res.text();
+                    setResponse(`HTTP ${res.status} ${res.statusText}\n\n${body}`);
+                } catch (err) {
+                    setResponse(`Request failed\n\n${err}`);
+                }
+            }
+
+            async function callChatCompletions(forceStream) {
+                const raw = document.getElementById("chatPayload").value;
+                let payload;
+                try {
+                    payload = JSON.parse(raw);
+                } catch (err) {
+                    setResponse(`JSON inválido no payload\n\n${err}`);
+                    return;
+                }
+
+                payload.model = document.getElementById("chatModel").value.trim() || payload.model;
+                payload.stream = forceStream;
+
+                setRequestInfo(`POST /v1/chat/completions\nstream=${String(forceStream)}\nmodel=${payload.model}`);
+                setResponse("Enviando...");
+
+                const headers = buildHeaders();
+                headers["Content-Type"] = "application/json";
+
+                try {
+                    const res = await fetch("/v1/chat/completions", {
+                        method: "POST",
+                        headers,
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!forceStream) {
+                        const body = await res.text();
+                        setResponse(`HTTP ${res.status} ${res.statusText}\n\n${body}`);
+                        return;
+                    }
+
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+                    let output = `HTTP ${res.status} ${res.statusText}\n\n`;
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        output += decoder.decode(value, { stream: true });
+                        setResponse(output);
+                    }
+                } catch (err) {
+                    setResponse(`Request failed\n\n${err}`);
+                }
+            }
+        </script>
     </body>
 </html>

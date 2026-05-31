@@ -468,29 +468,19 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	var query string
-	convID := input.User
+	convID := strings.TrimSpace(input.User)
 
-	if convID == "" && len(input.Messages) > 0 {
-		sessionKey := services.GenerateFingerprint(input.Messages)
-		if cachedID, found := services.GlobalCache.Get(sessionKey); found {
-			convID = cachedID.(string)
-			fmt.Printf("Detected existing session via fingerprint: %s\n", convID)
-		} else if storedID, err := services.GetSession(sessionKey); err == nil && storedID != "" {
-			convID = storedID
-			services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
-			fmt.Printf("Detected existing session via database fingerprint: %s\n", convID)
-		} else {
-			convID = utils.GenerateID()
-			services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
-			_ = services.SaveSession(sessionKey, convID)
-			auth, authErr := services.GetSelectedAuth()
-			if authErr == nil {
-				if err := services.CreateConversation(auth, convID); err != nil {
-					fmt.Printf("Failed to register conversation with Xiaomi: %v\n", err)
-				}
+	if convID == "" {
+		// OpenAI-style clients already send the conversation window in messages.
+		// Reusing Xiaomi sessions by heuristic fingerprint makes unrelated tasks bleed together.
+		convID = utils.GenerateID()
+		auth, authErr := services.GetSelectedAuth()
+		if authErr == nil {
+			if err := services.CreateConversation(auth, convID); err != nil {
+				fmt.Printf("Failed to register fresh conversation with Xiaomi: %v\n", err)
 			}
-			fmt.Printf("Started and registered new session for fingerprint: %s\n", convID)
 		}
+		fmt.Printf("Started fresh request-scoped session: %s\n", convID)
 	}
 
 	if convID != "" {

@@ -612,113 +612,44 @@ func handleChatCompletions(c *gin.Context) {
 
 	var query string
 	convID := input.User
-	var sessionKey string
-	
-	// Automatic Media Upload
-	currentAuth, err := services.GetSelectedAuth()
-	if err != nil {
-		fmt.Printf("Invalid Xiaomi auth configuration during automatic media upload: %v\n", err)
-		utils.SendError(c, http.StatusInternalServerError, "Invalid Xiaomi auth configuration", "server_error", nil)
-		return
-	}
-	autoMedias := processAutoUploads(input.Messages, currentAuth)
-	if len(autoMedias) > 0 {
-		input.MultiMedias = append(input.MultiMedias, autoMedias...)
-	}
 
-	// AUTOMATIC SESSION DETECTION: If User ID is empty, try to identify conversation by history hash
+	// Simpler session detection from the first build.
 	if convID == "" && len(input.Messages) > 0 {
-		sessionKey = services.GenerateFingerprint(input.Messages)
-		
-		// 1. Try Memory Cache
+		firstMsg := input.Messages[0].Role + ":" + services.ExtractText(input.Messages[0].Content, true)
+		if len(firstMsg) > 200 {
+			firstMsg = firstMsg[:200]
+		}
+		sessionKey := fmt.Sprintf("sess_%x", firstMsg)
 		if cachedID, found := services.GlobalCache.Get(sessionKey); found {
 			convID = cachedID.(string)
-			fmt.Printf("Detected existing session via memory fingerprint: %s\n", convID)
+			fmt.Printf("Detected existing session via fingerprint: %s\n", convID)
 		} else {
-			// 2. Try Database (Sessions table)
-			dbID, err := services.GetSession(sessionKey)
-			if err == nil && dbID != "" {
-				convID = dbID
-				services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
-				fmt.Printf("Detected existing session via database fingerprint: %s\n", convID)
-			} else {
-				// 3. Try Deep Recovery (Messages table fallback)
-				// Find first user message again for deep recovery text
-				var firstUserMsgIdx int = -1
-				for i, msg := range input.Messages {
-					if msg.Role == "user" {
-						firstUserMsgIdx = i
-						break
-					}
-				}
-				if firstUserMsgIdx == -1 {
-					firstUserMsgIdx = len(input.Messages) - 1
-				}
-
-				firstMsgText := services.ExtractText(input.Messages[firstUserMsgIdx].Content, false)
-				deepID, err := services.FindSessionByMessage("user", firstMsgText)
-				if err == nil && deepID != "" {
-					convID = deepID
-					services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
-					_ = services.SaveSession(sessionKey, convID)
-					fmt.Printf("Recovered existing session from message history: %s\n", convID)
-				} else {
-					// 4. First time seeing this conversation fingerprint
-					convID = utils.GenerateID()
-					services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
-					_ = services.SaveSession(sessionKey, convID)
-					
-					// Register the new conversation ID with Xiaomi
-					if err := services.CreateConversation(currentAuth, convID); err != nil {
-						fmt.Printf("Failed to register conversation with Xiaomi: %v\n", err)
-					}
-					fmt.Printf("Started and registered new session for fingerprint: %s\n", convID)
-				}
-			}
-		}
-	}
-
-	// AUTOMATIC SESSION REBOOT: If conversation failed 3+ times, start a new one with a summary
-	var summaryContext string
-	if convID != "" {
-		needsRebootKey := "needs_reboot_" + convID
-		if val, found := services.GlobalCache.Get(needsRebootKey); found && val.(bool) {
-			fmt.Printf("Rebooting session %s due to consecutive failures...\n", convID)
-			summaryContext = services.GenerateSummary(currentAuth, convID)
-			
-			// Generate new conversation ID
 			convID = utils.GenerateID()
-			
-			// Register new one
-			_ = services.CreateConversation(currentAuth, convID)
-			
-			// If we had a fingerprint, update it to point to the new convID
-			if sessionKey != "" {
-				services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
-				_ = services.SaveSession(sessionKey, convID)
+			services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
+			auth, authErr := services.GetSelectedAuth()
+			if authErr == nil {
+				if err := services.CreateConversation(auth, convID); err != nil {
+					fmt.Printf("Failed to register conversation with Xiaomi: %v\n", err)
+				}
 			}
-			
-			// Reset failure stats for the old and new (just in case) convIDs
-			services.GlobalCache.Delete(needsRebootKey)
-			services.GlobalCache.Delete("fail_count_" + convID) 
+			fmt.Printf("Started and registered new session for fingerprint: %s\n", convID)
 		}
 	}
 
-	// OPTIMIZATION: If we have a Conversation ID, we rely on Xiaomi's server-side state.
-	// We only send the last message to avoid hitting the 128KB payload limit for the 'query' field.
+	// Keep the original first-build conversation behavior.
 	if convID != "" {
-		// Sync local history if empty
 		localMsgs, _ := services.GetLocalHistory(convID)
 		if len(localMsgs) == 0 {
-			// Register/Save the conversation ID with Xiaomi first to be safe
-			_ = services.CreateConversation(currentAuth, convID)
-
-			remoteHistory, err := services.GetConversationHistory(currentAuth, convID)
-			if err == nil && len(remoteHistory) > 0 {
-				for _, item := range remoteHistory {
-					services.SaveMessage(convID, item.MsgID+"_u", "user", item.InputInfo.Query)
-					if len(item.DialogLogDetailList) > 0 {
-						services.SaveMessage(convID, item.MsgID+"_a", "assistant", item.DialogLogDetailList[0].Result)
+			auth, authErr := services.GetSelectedAuth()
+			if authErr == nil {
+				_ = services.CreateConversation(auth, convID)
+				remoteHistory, err := services.GetConversationHistory(auth, convID)
+				if err == nil && len(remoteHistory) > 0 {
+					for _, item := range remoteHistory {
+						services.SaveMessage(convID, item.MsgID+"_u", "user", item.InputInfo.Query)
+						if len(item.DialogLogDetailList) > 0 {
+							services.SaveMessage(convID, item.MsgID+"_a", "assistant", item.DialogLogDetailList[0].Result)
+						}
 					}
 				}
 			}
@@ -726,12 +657,6 @@ func handleChatCompletions(c *gin.Context) {
 
 		lastMessage := input.Messages[len(input.Messages)-1]
 		lastMessageText := utils.FormatMessageForMiMo(lastMessage)
-		
-		// Prepend summary if this is a rebooted session
-		if summaryContext != "" {
-			lastMessageText = summaryContext + lastMessageText
-		}
-		
 		services.SaveMessage(convID, "user_"+utils.GenerateID(), "user", lastMessageText)
 		
 		var systemContent string
@@ -753,9 +678,6 @@ func handleChatCompletions(c *gin.Context) {
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		query = utils.FormatMessageForMiMo(lastMessage)
-		if summaryContext != "" {
-			query = summaryContext + query
-		}
 	} else {
 		// Do not limit history unless it exceeds 1M tokens (~4M characters)
 		var processedMessages []string
@@ -834,9 +756,6 @@ func handleChatCompletions(c *gin.Context) {
 			Model:           targetModel,
 		},
 		MultiMedias: []models.MultiMedia{},
-	}
-	if len(input.MultiMedias) > 0 {
-		payload.MultiMedias = input.MultiMedias
 	}
 	if payload.ConversationID == "" {
 		payload.ConversationID = utils.GenerateID()

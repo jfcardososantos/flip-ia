@@ -12,6 +12,8 @@ package utils
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"mimoproxy/internal/models"
 	"time"
 
@@ -67,4 +69,40 @@ func SendError(c *gin.Context, status int, message, errorType string, code *stri
 
 func PointerToString(s string) *string {
 	return &s
+}
+
+// WriteSSEChunk writes one OpenAI-style SSE data frame.
+func WriteSSEChunk(c *gin.Context, chunk models.ChatCompletionChunk) {
+	b, _ := json.Marshal(chunk)
+	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+	c.Writer.Flush()
+}
+
+// EmitStreamToolCall sends tool call deltas in the OpenAI streaming shape (id/name, then arguments).
+func EmitStreamToolCall(c *gin.Context, completionID, model string, tc models.ToolCall) {
+	callID := tc.ID
+	if callID == "" {
+		callID = "call_" + GenerateID()
+	}
+	idx := tc.Index
+
+	nameChunk := CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{{
+		Index: idx,
+		ID:    callID,
+		Type:  "function",
+		Function: models.ToolFunction{
+			Name: tc.Function.Name,
+		},
+	}})
+	WriteSSEChunk(c, nameChunk)
+
+	if tc.Function.Arguments != "" {
+		argsChunk := CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{{
+			Index: idx,
+			Function: models.ToolFunction{
+				Arguments: tc.Function.Arguments,
+			},
+		}})
+		WriteSSEChunk(c, argsChunk)
+	}
 }

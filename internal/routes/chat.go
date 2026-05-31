@@ -101,6 +101,7 @@ func RegisterChatRoutes(r *gin.Engine, authMiddleware gin.HandlerFunc) {
 	{
 		v1.GET("/models", handleModels)
 		v1.POST("/chat/completions", handleChatCompletions)
+		v1.POST("/completions", handleCompletions)
 		v1.GET("/chat/history/:conversationId", handleGetHistory)
 	}
 
@@ -368,12 +369,14 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	var input struct {
-		Messages  []models.Message `json:"messages"`
-		Model     string           `json:"model"`
-		Stream    bool             `json:"stream"`
-		User      string           `json:"user"`
-		Tools     []models.Tool    `json:"tools"`
-		WebSearch bool             `json:"web_search"`
+		Messages          []models.Message `json:"messages"`
+		Model             string           `json:"model"`
+		Stream            bool             `json:"stream"`
+		User              string           `json:"user"`
+		Tools             []models.Tool    `json:"tools"`
+		ToolChoice        interface{}      `json:"tool_choice"`
+		ParallelToolCalls *bool            `json:"parallel_tool_calls"`
+		WebSearch         bool             `json:"web_search"`
 	}
 
 	if err = c.ShouldBindJSON(&input); err != nil {
@@ -386,7 +389,8 @@ func handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	toolInstructions := utils.FormatToolsAsInstructions(input.Tools)
+	toolChoice := resolveToolChoice(input.ToolChoice)
+	toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
 	sessionHandle := strings.TrimSpace(input.User)
 	if sessionHandle == "" {
 		sessionHandle = services.GenerateFingerprint(input.Messages)
@@ -398,6 +402,12 @@ func handleChatCompletions(c *gin.Context) {
 				lastMsg := input.Messages[len(input.Messages)-1]
 				if lastMsg.Role == "tool" {
 					nextTool := pendingTools[0]
+					if nextTool.ID == "" {
+						nextTool.ID = "call_" + utils.GenerateID()
+					}
+					if nextTool.Type == "" {
+						nextTool.Type = "function"
+					}
 					remaining := pendingTools[1:]
 					if len(remaining) > 0 {
 						services.GlobalCache.Set("pending_tools_"+sessionHandle, remaining, 10*time.Minute)
@@ -522,7 +532,8 @@ func handleChatCompletions(c *gin.Context) {
 
 	enableThinking := !strings.Contains(input.Model, "no-thinking")
 	webSearchStatus := "disabled"
-	if strings.Contains(input.Model, "search") || input.WebSearch {
+	if utils.ShouldEnableWebSearch(targetModel, input.WebSearch, input.Tools) ||
+		os.Getenv("DEFAULT_WEB_SEARCH") == "true" || os.Getenv("DEFAULT_WEB_SEARCH") == "1" {
 		webSearchStatus = "enabled"
 	}
 
@@ -611,14 +622,83 @@ func handleChatCompletions(c *gin.Context) {
 		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
 		c.Writer.Flush()
 
-		processStream(c, bodyReader, completionID, targetModel, historyID, query, input.Tools)
+		processStream(c, bodyReader, completionID, targetModel, historyID, query, input.ParallelToolCalls)
 		return
 	}
 
-	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, input.Tools)
+	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, input.ParallelToolCalls)
 }
 
-func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, availableTools []models.Tool) {
+func resolveToolChoice(raw interface{}) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case map[string]interface{}:
+		if t, ok := v["type"].(string); ok {
+			return t
+		}
+		if fn, ok := v["function"].(map[string]interface{}); ok {
+			if name, ok := fn["name"].(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// handleCompletions exposes the legacy OpenAI completions API by mapping prompt -> chat messages.
+func handleCompletions(c *gin.Context) {
+	bodyCopy, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		utils.SendError(c, http.StatusBadRequest, "Failed to read request body", "invalid_request_error", nil)
+		return
+	}
+
+	var legacy struct {
+		Model       string      `json:"model"`
+		Prompt      interface{} `json:"prompt"`
+		Stream      bool        `json:"stream"`
+		MaxTokens   int         `json:"max_tokens"`
+		Temperature float64     `json:"temperature"`
+		User        string      `json:"user"`
+	}
+	if err := json.Unmarshal(bodyCopy, &legacy); err != nil {
+		utils.SendError(c, http.StatusBadRequest, "Invalid request body", "invalid_request_error", nil)
+		return
+	}
+
+	promptText := ""
+	switch p := legacy.Prompt.(type) {
+	case string:
+		promptText = p
+	case []interface{}:
+		var parts []string
+		for _, item := range p {
+			if s, ok := item.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		promptText = strings.Join(parts, "\n")
+	}
+
+	if strings.TrimSpace(promptText) == "" {
+		utils.SendError(c, http.StatusBadRequest, "prompt is required", "invalid_request_error", nil)
+		return
+	}
+
+	chatBody := map[string]interface{}{
+		"model":    legacy.Model,
+		"stream":   legacy.Stream,
+		"user":     legacy.User,
+		"messages": []models.Message{{Role: "user", Content: promptText}},
+	}
+	chatBytes, _ := json.Marshal(chatBody)
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(chatBytes))
+	c.Request.ContentLength = int64(len(chatBytes))
+	handleChatCompletions(c)
+}
+
+func processStream(c *gin.Context, body io.Reader, completionID, model string, userID string, query string, parallelToolCalls *bool) {
 	reader := bufio.NewReaderSize(body, 16*1024*1024)
 
 	var inThinking bool
@@ -664,25 +744,15 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 		fullText.WriteString("</tool_call>")
 
 		if _, parsedToolCalls := utils.ParseToolCalls("<tool_call>" + toolCallBuffer.String() + "</tool_call>"); len(parsedToolCalls) > 0 {
+			parsedToolCalls = utils.AssignToolCallIndexes(parsedToolCalls)
 			parsedToolCalls[0].Index = toolCallIndex
-			if parsedToolCalls[0].ID == "" {
-				parsedToolCalls[0].ID = "call_" + utils.GenerateID()
-			}
-			if parsedToolCalls[0].Type == "" {
-				parsedToolCalls[0].Type = "function"
-			}
-			chunk := utils.CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{parsedToolCalls[0]})
-			b, _ := json.Marshal(chunk)
-			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
-			c.Writer.Flush()
+			utils.EmitStreamToolCall(c, completionID, model, parsedToolCalls[0])
 			emittedToolCall = true
 		}
 	}
 
-	var toolCalls []models.ToolCall
-	if len(availableTools) > 0 {
-		_, toolCalls = utils.ParseToolCalls(fullText.String())
-	}
+	_, toolCalls := utils.ParseToolCalls(fullText.String())
+	toolCalls = finalizeToolCalls(toolCalls)
 
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
@@ -699,8 +769,14 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", fullText.String())
 
 	finalToolCalls := []models.ToolCall(nil)
-	if finishReason == "tool_calls" && !emittedToolCall && len(toolCalls) > 0 {
-		finalToolCalls = toolCalls
+	if finishReason == "tool_calls" {
+		if !emittedToolCall && len(toolCalls) > 0 {
+			for _, tc := range toolCalls {
+				utils.EmitStreamToolCall(c, completionID, model, tc)
+			}
+		} else if len(toolCalls) > 1 {
+			storePendingToolCalls(userID, toolCalls)
+		}
 	}
 	finalChunk := utils.CreateChatCompletionChunk(completionID, "", model, &finishReason, "", &usage, finalToolCalls)
 	finalBytes, _ := json.Marshal(finalChunk)
@@ -709,7 +785,25 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	c.Writer.Flush()
 }
 
-func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool) {
+func finalizeToolCalls(toolCalls []models.ToolCall) []models.ToolCall {
+	return utils.AssignToolCallIndexes(toolCalls)
+}
+
+func responseToolCalls(toolCalls []models.ToolCall, parallelToolCalls *bool) []models.ToolCall {
+	if parallelToolCalls != nil && !*parallelToolCalls && len(toolCalls) > 1 {
+		return toolCalls[:1]
+	}
+	return toolCalls
+}
+
+func storePendingToolCalls(sessionID string, toolCalls []models.ToolCall) {
+	if sessionID == "" || len(toolCalls) <= 1 {
+		return
+	}
+	services.GlobalCache.Set("pending_tools_"+sessionID, toolCalls[1:], 10*time.Minute)
+}
+
+func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, parallelToolCalls *bool) {
 	respBody, _ := io.ReadAll(body)
 	events := strings.Split(string(respBody), "\n\n")
 
@@ -749,20 +843,17 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		fullText.WriteString("</tool_call>")
 	}
 
-	cleanText := strings.TrimSpace(fullText.String())
-	var toolCalls []models.ToolCall
-	if len(availableTools) > 0 {
-		cleanText, toolCalls = utils.ParseToolCalls(fullText.String())
-	}
+	cleanText, toolCalls := utils.ParseToolCalls(fullText.String())
+	cleanText = strings.TrimSpace(cleanText)
+	toolCalls = finalizeToolCalls(toolCalls)
+	responseCalls := responseToolCalls(toolCalls, parallelToolCalls)
 
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
 		cleanText = ""
 		reasoningText.Reset()
-		if userID != "" && len(toolCalls) > 1 {
-			services.GlobalCache.Set("pending_tools_"+userID, toolCalls[1:], 10*time.Minute)
-		}
+		storePendingToolCalls(userID, toolCalls)
 	}
 
 	if usage.TotalTokens == 0 {
@@ -798,7 +889,7 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 					Role:             "assistant",
 					Content:          cleanText,
 					ReasoningContent: strings.TrimSpace(reasoningText.String()),
-					ToolCalls:        toolCalls,
+					ToolCalls:        responseCalls,
 				},
 				FinishReason: &finishReason,
 			},
@@ -896,17 +987,9 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 				if isStreaming {
 					_, parsedToolCalls := utils.ParseToolCalls(rawToolCall)
 					if len(parsedToolCalls) > 0 {
+						parsedToolCalls = utils.AssignToolCallIndexes(parsedToolCalls)
 						parsedToolCalls[0].Index = *toolCallIndex
-						if parsedToolCalls[0].ID == "" {
-							parsedToolCalls[0].ID = "call_" + utils.GenerateID()
-						}
-						if parsedToolCalls[0].Type == "" {
-							parsedToolCalls[0].Type = "function"
-						}
-						chunk := utils.CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{parsedToolCalls[0]})
-						b, _ := json.Marshal(chunk)
-						c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
-						c.Writer.Flush()
+						utils.EmitStreamToolCall(c, completionID, model, parsedToolCalls[0])
 					}
 				}
 

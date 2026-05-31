@@ -1,0 +1,41 @@
+package utils
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestParseToolCallsXML(t *testing.T) {
+	text := `Vou buscar isso.
+<tool_call>{"name": "WebSearch", "arguments": {"search_term": "golang 1.24"}}</tool_call>`
+	clean, calls := ParseToolCalls(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "WebSearch" {
+		t.Fatalf("unexpected name: %s", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "golang") {
+		t.Fatalf("unexpected arguments: %s", calls[0].Function.Arguments)
+	}
+	if strings.Contains(clean, "tool_call") {
+		t.Fatalf("expected clean text without tool markup, got %q", clean)
+	}
+}
+
+func TestParseToolCallsTrailingJSON(t *testing.T) {
+	text := "Resposta aqui.\n```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/a\"}}\n```"
+	_, calls := ParseToolCalls(text)
+	if len(calls) != 1 || calls[0].Function.Name != "read_file" {
+		t.Fatalf("expected read_file tool call, got %+v", calls)
+	}
+}
+
+func TestShouldEnableWebSearch(t *testing.T) {
+	if !ShouldEnableWebSearch("mimo-search", false, nil) {
+		t.Fatal("expected search in model name to enable web search")
+	}
+	if !ShouldEnableWebSearch("mimo", true, nil) {
+		t.Fatal("expected explicit web_search flag")
+	}
+}

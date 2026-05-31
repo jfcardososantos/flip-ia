@@ -8,7 +8,7 @@ O **Mimo AI Proxy** não é apenas uma camada de tradução; é um gateway compl
 
 ## Funcionalidades Principais
 
-- **OpenAI Standard Gateway**: Implementação completa dos endpoints `/v1/chat/completions` e `/v1/models`.
+- **OpenAI Standard Gateway**: Implementação completa dos endpoints `/v1/chat/completions`, `/v1/completions` e `/v1/models`.
 - **Inteligência de Sessão**: 
   - Detecção automática de conversas via fingerprinting de mensagens.
   - Sincronização bi-direcional com o histórico oficial da Xiaomi.
@@ -19,7 +19,7 @@ O **Mimo AI Proxy** não é apenas uma camada de tradução; é um gateway compl
 - **AI-Native Features**:
   - **Reasoning (Thinking)**: Extração nativa de blocos `<think>` para o campo `reasoning_content`.
   - **Sequential Tool Calling**: Orquestração de múltiplas chamadas de ferramentas em sequência.
-  - **Web Search**: Ativação dinâmica de busca na web via modelo ou parâmetro de requisição.
+  - **Web Search**: Ativação dinâmica de busca na web via modelo, `web_search: true`, ferramentas com nome `search`/`web`, ou `DEFAULT_WEB_SEARCH=true`.
 - **Infraestrutura e Operações**:
   - **Live Dashboard**: Interface web integrada para monitoramento de uptime, latência upstream e consumo de tokens por conta.
   - **Browser Extension Login Flow**: Extensão Chrome/Edge para capturar a sessão autenticada da Xiaomi AI Studio e salvar no proxy.
@@ -66,9 +66,19 @@ curl http://localhost:3000/v1/chat/completions \
   -d '{
     "model": "mimo-v2.5-pro",
     "messages": [{"role": "user", "content": "Explique a teoria da relatividade."}],
-    "stream": true
+    "stream": true,
+    "web_search": true
   }'
 ```
+
+### IDE / Vibecoding (tool calls)
+
+Configure o cliente OpenAI da IDE apontando para `http://localhost:3000/v1` com `Authorization: Bearer <API_KEY>`.
+
+- Envie `tools` e `tool_choice` normalmente; o proxy converte para o formato XML do Mimo e devolve `tool_calls` compatíveis com OpenAI.
+- Use `stream: true` para respostas em tempo real (recomendado para Cursor e similares).
+- Para busca atualizada na web, use `"web_search": true` ou um modelo com `search` no nome.
+- Com `parallel_tool_calls: false`, apenas a primeira ferramenta é retornada por turno; as demais seguem após mensagens `role: tool`.
 
 ## Setup Assistido
 

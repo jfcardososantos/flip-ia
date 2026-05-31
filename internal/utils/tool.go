@@ -14,6 +14,8 @@ import (
 	"strings"
 )
 
+var trailingToolJSONRegex = regexp.MustCompile(`(?s)\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*.*\}$`)
+
 // FormatToolsAsInstructions mirrors the simpler behavior from the first project version.
 func FormatToolsAsInstructions(tools []models.Tool) string {
 	if len(tools) == 0 {
@@ -36,6 +38,54 @@ func FormatToolsAsInstructions(tools []models.Tool) string {
 	}
 
 	return sb.String()
+}
+
+// FormatToolsAsInstructionsWithChoice appends tool_choice guidance for IDE clients.
+func FormatToolsAsInstructionsWithChoice(tools []models.Tool, toolChoice string) string {
+	base := FormatToolsAsInstructions(tools)
+	if base == "" {
+		return base
+	}
+	if toolChoice == "" || toolChoice == "auto" {
+		return base
+	}
+	var sb strings.Builder
+	sb.WriteString(base)
+	sb.WriteString("\nTool choice policy: ")
+	sb.WriteString(toolChoice)
+	sb.WriteString(".\n")
+	if toolChoice == "required" || toolChoice == "any" {
+		sb.WriteString("You MUST respond with at least one tool call using the XML format above.\n")
+	}
+	return sb.String()
+}
+
+// ShouldEnableWebSearch decides when to turn on Xiaomi native web search.
+func ShouldEnableWebSearch(model string, webSearchFlag bool, tools []models.Tool) bool {
+	if webSearchFlag || strings.Contains(strings.ToLower(model), "search") {
+		return true
+	}
+	for _, tool := range tools {
+		name := strings.ToLower(tool.Function.Name)
+		if strings.Contains(name, "search") || strings.Contains(name, "web") || strings.Contains(name, "browse") {
+			return true
+		}
+	}
+	return false
+}
+
+// AssignToolCallIndexes ensures OpenAI-compatible index fields on each call.
+func AssignToolCallIndexes(toolCalls []models.ToolCall) []models.ToolCall {
+	for i := range toolCalls {
+		toolCalls[i].Index = i
+		if toolCalls[i].ID == "" {
+			toolCalls[i].ID = "call_" + GenerateID()
+		}
+		if toolCalls[i].Type == "" {
+			toolCalls[i].Type = "function"
+		}
+	}
+	return toolCalls
 }
 
 // ParseToolCalls mirrors the simpler, more permissive parser from the first project version.
@@ -109,7 +159,38 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 
 	if len(toolCalls) == 0 {
 		trimmedText := strings.TrimSpace(text)
-		if idx := strings.LastIndex(trimmedText, `{"name"`); idx != -1 {
+		trimmedText = strings.TrimPrefix(trimmedText, "```json")
+		trimmedText = strings.TrimPrefix(trimmedText, "```")
+		trimmedText = strings.TrimSuffix(trimmedText, "```")
+		trimmedText = strings.TrimSpace(trimmedText)
+
+		if match := trailingToolJSONRegex.FindString(trimmedText); match != "" {
+			idx := strings.LastIndex(trimmedText, match)
+			candidate := strings.TrimSpace(trimmedText[idx:])
+			var toolCallData struct {
+				Name      string      `json:"name"`
+				Arguments interface{} `json:"arguments"`
+			}
+			if err := json.Unmarshal([]byte(candidate), &toolCallData); err == nil && toolCallData.Name != "" && toolCallData.Arguments != nil {
+				var argsStr string
+				switch v := toolCallData.Arguments.(type) {
+				case string:
+					argsStr = v
+				default:
+					b, _ := json.Marshal(v)
+					argsStr = string(b)
+				}
+				toolCalls = append(toolCalls, models.ToolCall{
+					ID:   "call_" + GenerateID(),
+					Type: "function",
+					Function: models.ToolFunction{
+						Name:      toolCallData.Name,
+						Arguments: argsStr,
+					},
+				})
+				cleanText = strings.TrimSpace(trimmedText[:idx])
+			}
+		} else if idx := strings.LastIndex(trimmedText, `{"name"`); idx != -1 {
 			candidate := strings.TrimSpace(trimmedText[idx:])
 			if strings.HasSuffix(candidate, "}") {
 				var toolCallData struct {

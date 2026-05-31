@@ -233,7 +233,8 @@ func main() {
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, X-Timezone")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, X-Timezone, OpenAI-Beta")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "Content-Type")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)

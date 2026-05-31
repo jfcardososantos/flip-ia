@@ -164,18 +164,26 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 }
 
 func NormalizeToolCalls(toolCalls []models.ToolCall, availableTools []models.Tool) []models.ToolCall {
-	if len(toolCalls) == 0 || len(availableTools) == 0 {
+	if len(toolCalls) == 0 {
 		return toolCalls
 	}
 
 	available := make(map[string]models.ToolDefinition, len(availableTools))
-	for _, tool := range availableTools {
-		if tool.Type == "function" {
-			available[tool.Function.Name] = tool.Function
+	if len(availableTools) > 0 {
+		for _, tool := range availableTools {
+			if tool.Type == "function" {
+				available[tool.Function.Name] = tool.Function
+			}
 		}
 	}
 
 	for i := range toolCalls {
+		toolCalls[i].Function.Arguments = RepairToolArguments(toolCalls[i].Function.Arguments)
+
+		if len(available) == 0 {
+			continue
+		}
+
 		name := toolCalls[i].Function.Name
 		if _, ok := available[name]; ok {
 			continue
@@ -188,6 +196,91 @@ func NormalizeToolCalls(toolCalls []models.ToolCall, availableTools []models.Too
 	}
 
 	return toolCalls
+}
+
+func RepairToolArguments(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+
+	// Remove markdown code fences when the model wraps JSON incorrectly.
+	raw = regexp.MustCompile("(?s)^```[a-zA-Z]*\\s*").ReplaceAllString(raw, "")
+	raw = regexp.MustCompile("(?s)\\s*```$").ReplaceAllString(raw, "")
+	raw = strings.TrimSpace(raw)
+
+	// Already valid JSON.
+	var probe interface{}
+	if json.Unmarshal([]byte(raw), &probe) == nil {
+		return raw
+	}
+
+	// Extract the first balanced JSON object/array if extra braces or trailing text were emitted.
+	if candidate := extractBalancedJSON(raw); candidate != "" {
+		if json.Unmarshal([]byte(candidate), &probe) == nil {
+			return candidate
+		}
+	}
+
+	// Common model glitch: one or more extra closing braces at the end.
+	trimmed := raw
+	for strings.HasSuffix(trimmed, "}") || strings.HasSuffix(trimmed, "]") {
+		trimmed = strings.TrimSpace(trimmed[:len(trimmed)-1])
+		if balanced := extractBalancedJSON(trimmed); balanced != "" {
+			if json.Unmarshal([]byte(balanced), &probe) == nil {
+				return balanced
+			}
+		}
+	}
+
+	return raw
+}
+
+func extractBalancedJSON(raw string) string {
+	start := strings.IndexAny(raw, "{[")
+	if start == -1 {
+		return ""
+	}
+
+	var stack []rune
+	inString := false
+	escaped := false
+
+	for i, r := range raw[start:] {
+		switch {
+		case escaped:
+			escaped = false
+			continue
+		case r == '\\' && inString:
+			escaped = true
+			continue
+		case r == '"':
+			inString = !inString
+			continue
+		case inString:
+			continue
+		case r == '{' || r == '[':
+			stack = append(stack, r)
+		case r == '}':
+			if len(stack) == 0 || stack[len(stack)-1] != '{' {
+				return strings.TrimSpace(raw[start : start+i])
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return strings.TrimSpace(raw[start : start+i+1])
+			}
+		case r == ']':
+			if len(stack) == 0 || stack[len(stack)-1] != '[' {
+				return strings.TrimSpace(raw[start : start+i])
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return strings.TrimSpace(raw[start : start+i+1])
+			}
+		}
+	}
+
+	return ""
 }
 
 func ExtractTerminalToolContent(toolCalls []models.ToolCall) (string, []models.ToolCall) {

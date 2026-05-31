@@ -18,6 +18,22 @@ type ChatCompletionChunk struct {
 	Usage   *Usage   `json:"usage,omitempty"`
 }
 
+type CompletionResponse struct {
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Created int64              `json:"created"`
+	Model   string             `json:"model"`
+	Choices []CompletionChoice `json:"choices"`
+	Usage   *Usage             `json:"usage,omitempty"`
+}
+
+type CompletionChoice struct {
+	Text         string  `json:"text"`
+	Index        int     `json:"index"`
+	Logprobs     any     `json:"logprobs"`
+	FinishReason *string `json:"finish_reason"`
+}
+
 type Choice struct {
 	Index        int         `json:"index"`
 	Delta        Delta       `json:"delta"`

@@ -646,6 +646,26 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 		}
 	}
 
+	if inToolCall && toolCallBuffer.Len() > 0 {
+		fullText.WriteString("<tool_call>")
+		fullText.WriteString(toolCallBuffer.String())
+		fullText.WriteString("</tool_call>")
+
+		if _, parsedToolCalls := utils.ParseToolCalls("<tool_call>" + toolCallBuffer.String() + "</tool_call>"); len(parsedToolCalls) > 0 {
+			parsedToolCalls[0].Index = toolCallIndex
+			if parsedToolCalls[0].ID == "" {
+				parsedToolCalls[0].ID = "call_" + utils.GenerateID()
+			}
+			if parsedToolCalls[0].Type == "" {
+				parsedToolCalls[0].Type = "function"
+			}
+			chunk := utils.CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{parsedToolCalls[0]})
+			b, _ := json.Marshal(chunk)
+			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+			c.Writer.Flush()
+		}
+	}
+
 	var toolCalls []models.ToolCall
 	if len(availableTools) > 0 {
 		_, toolCalls = utils.ParseToolCalls(fullText.String())
@@ -704,6 +724,12 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		if dataStr != "" {
 			processEvent(c, eventType, dataStr, completionID, model, false, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
 		}
+	}
+
+	if inToolCall && toolCallBuffer.Len() > 0 {
+		fullText.WriteString("<tool_call>")
+		fullText.WriteString(toolCallBuffer.String())
+		fullText.WriteString("</tool_call>")
 	}
 
 	cleanText := strings.TrimSpace(fullText.String())

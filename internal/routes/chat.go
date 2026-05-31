@@ -290,63 +290,6 @@ func syncConversationMessages(convID string, messages []models.Message) {
 	}
 }
 
-func buildEffectiveMessages(localMessages []models.Message, requestMessages []models.Message) []models.Message {
-	filteredRequest := make([]models.Message, 0, len(requestMessages))
-	for _, message := range requestMessages {
-		if message.Role == "system" {
-			filteredRequest = append(filteredRequest, message)
-			continue
-		}
-		if strings.TrimSpace(utils.FormatMessageForMiMo(message)) == "" {
-			continue
-		}
-		filteredRequest = append(filteredRequest, message)
-	}
-
-	if len(localMessages) == 0 {
-		return filteredRequest
-	}
-
-	filteredLocal := make([]models.Message, 0, len(localMessages))
-	for _, local := range localMessages {
-		if local.Role == "system" {
-			continue
-		}
-		if strings.TrimSpace(utils.FormatMessageForMiMo(local)) == "" {
-			continue
-		}
-		filteredLocal = append(filteredLocal, local)
-	}
-
-	if len(filteredLocal) == 0 {
-		return filteredRequest
-	}
-
-	overlap := 0
-	maxOverlap := len(filteredLocal)
-	if len(filteredRequest) < maxOverlap {
-		maxOverlap = len(filteredRequest)
-	}
-	for n := maxOverlap; n >= 1; n-- {
-		match := true
-		for i := 0; i < n; i++ {
-			if filteredLocal[len(filteredLocal)-n+i].Role != filteredRequest[i].Role ||
-				utils.FormatMessageForMiMo(filteredLocal[len(filteredLocal)-n+i]) != utils.FormatMessageForMiMo(filteredRequest[i]) {
-				match = false
-				break
-			}
-		}
-		if match {
-			overlap = n
-			break
-		}
-	}
-
-	merged := append([]models.Message{}, filteredLocal[:len(filteredLocal)-overlap]...)
-	merged = append(merged, filteredRequest...)
-	return merged
-}
-
 func buildConversationQuery(messages []models.Message, toolInstructions string) string {
 	var processedMessages []string
 	var systemPrompt string
@@ -570,11 +513,7 @@ func handleChatCompletions(c *gin.Context) {
 		}
 
 		syncConversationMessages(convID, input.Messages)
-		effectiveMessages := buildEffectiveMessages(localMsgs, input.Messages)
-		if len(effectiveMessages) == 0 {
-			effectiveMessages = input.Messages
-		}
-		query = buildConversationQuery(effectiveMessages, toolInstructions)
+		query = buildConversationQuery(input.Messages, toolInstructions)
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		query = utils.FormatMessageForMiMo(lastMessage)

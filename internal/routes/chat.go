@@ -669,10 +669,6 @@ func handleChatCompletions(c *gin.Context) {
 			query = lastMessageText
 		}
 		
-		// Add a final reminder at the very end of the user's message to ensure strict tool usage
-		if toolInstructions != "" && !strings.Contains(lastMessageText, "SYSTEM REMINDER") {
-			query += "\n\n[SYSTEM REMINDER: If you need to inspect files, search code, run commands, or take any action, respond ONLY with a `<tool_call>` block using one exact tool name from the available tools list. Do NOT narrate intent like 'let me inspect' or 'I'll explore'. If no action is needed, answer normally in plain text.]"
-		}
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		query = utils.FormatMessageForMiMo(lastMessage)
@@ -710,10 +706,6 @@ func handleChatCompletions(c *gin.Context) {
 			}
 		}
 		
-		if toolInstructions != "" {
-			query += "\n\n[SYSTEM REMINDER: If you need to inspect files, search code, run commands, or take any action, respond ONLY with a `<tool_call>` block using one exact tool name from the available tools list. Do NOT narrate intent like 'let me inspect' or 'I'll explore'. If no action is needed, answer normally in plain text.]"
-		}
-
 		// Only truncate if we exceed the safety limit for payload stability
 		// Mimo officially supports 1M tokens (~4M characters)
 		maxChars := 4000000
@@ -826,56 +818,26 @@ func handleChatCompletions(c *gin.Context) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		if len(input.Tools) > 0 {
-			processBufferedToolStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools, func(retryQuery string) (io.ReadCloser, error) {
-				retryPayload := payload
-				retryPayload.Query = retryQuery
-				retryResp, retryErr := sendMimoChatRequest(auth, retryPayload, customHeaders, completionID+"_retry")
-				if retryErr != nil {
-					return nil, retryErr
-				}
-				if retryResp.StatusCode != http.StatusOK {
-					body, _ := io.ReadAll(retryResp.Body)
-					retryResp.Body.Close()
-					return nil, fmt.Errorf("Xiaomi retry API error: %d - %s", retryResp.StatusCode, string(body))
-				}
-				return retryResp.Body, nil
-			})
-		} else {
-			// Send initial role chunk
-			initialChunk := models.ChatCompletionChunk{
-				ID:      "chatcmpl-" + completionID,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   targetModel,
-				Choices: []models.Choice{
-					{
-						Index: 0,
-						Delta: models.Delta{Role: "assistant"},
-					},
+		// Send initial role chunk
+		initialChunk := models.ChatCompletionChunk{
+			ID:      "chatcmpl-" + completionID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   targetModel,
+			Choices: []models.Choice{
+				{
+					Index: 0,
+					Delta: models.Delta{Role: "assistant"},
 				},
-			}
-			initialBytes, _ := json.Marshal(initialChunk)
-			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
-			c.Writer.Flush()
-
-			processStream(c, bodyReader, completionID, targetModel, payload.ConversationID, query, input.Tools)
+			},
 		}
+		initialBytes, _ := json.Marshal(initialChunk)
+		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
+		c.Writer.Flush()
+
+		processStream(c, bodyReader, completionID, targetModel, payload.ConversationID, query, input.Tools)
 	} else {
-		processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools, func(retryQuery string) (io.ReadCloser, error) {
-			retryPayload := payload
-			retryPayload.Query = retryQuery
-			retryResp, retryErr := sendMimoChatRequest(auth, retryPayload, customHeaders, completionID+"_retry")
-			if retryErr != nil {
-				return nil, retryErr
-			}
-			if retryResp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(retryResp.Body)
-				retryResp.Body.Close()
-				return nil, fmt.Errorf("Xiaomi retry API error: %d - %s", retryResp.StatusCode, string(body))
-			}
-			return retryResp.Body, nil
-		})
+		processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools)
 	}
 }
 
@@ -972,7 +934,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	c.Writer.Flush()
 }
 
-func processBufferedToolStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool, retryFetch func(string) (io.ReadCloser, error)) {
+func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool) {
 	respBody, _ := io.ReadAll(body)
 	events := strings.Split(string(respBody), "\n\n")
 
@@ -1020,129 +982,6 @@ func processBufferedToolStream(c *gin.Context, body io.Reader, completionID, mod
 		}
 	}
 
-	if shouldRetryForMissingToolCall(cleanText, toolCalls, availableTools) && retryFetch != nil {
-		retryQuery := query + "\n\n[RETRY INSTRUCTION: Your previous response described an intended action instead of using a tool. If any inspection, search, file read, code search, or command execution is needed, respond now with ONLY one valid `<tool_call>` block using an exact available tool name. Do not explain your plan.]"
-		retryBody, err := retryFetch(retryQuery)
-		if err == nil {
-			defer retryBody.Close()
-			processBufferedToolStream(c, retryBody, completionID, model, cacheKey, userID, retryQuery, availableTools, nil)
-			return
-		}
-	}
-
-	finishReason := "stop"
-	if len(toolCalls) > 0 {
-		finishReason = "tool_calls"
-		if userID != "" && len(toolCalls) > 1 {
-			services.GlobalCache.Set("pending_tools_"+userID, toolCalls[1:], 10*time.Minute)
-		}
-	}
-
-	if usage.TotalTokens == 0 {
-		usage.PromptTokens = len(query) / 4
-		usage.CompletionTokens = fullText.Len() / 4
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-	}
-	IncrementTokenStat(os.Getenv("SERVICE_TOKEN"), usage.TotalTokens)
-
-	services.SaveMessage(userID, "asst_"+completionID, "assistant", fullText.String())
-	updateConversationFailStats(userID, fullText.String())
-
-	roleChunk := models.ChatCompletionChunk{
-		ID:      "chatcmpl-" + completionID,
-		Object:  "chat.completion.chunk",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []models.Choice{{Index: 0, Delta: models.Delta{Role: "assistant"}}},
-	}
-	roleBytes, _ := json.Marshal(roleChunk)
-	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(roleBytes)))
-
-	if strings.TrimSpace(cleanText) != "" || strings.TrimSpace(reasoningText.String()) != "" || len(toolCalls) > 0 {
-		mainChunk := models.ChatCompletionChunk{
-			ID:      "chatcmpl-" + completionID,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   model,
-			Choices: []models.Choice{{
-				Index: 0,
-				Delta: models.Delta{
-					Content:          cleanText,
-					ReasoningContent: strings.TrimSpace(reasoningText.String()),
-					ToolCalls:        toolCalls,
-				},
-			}},
-		}
-		mainBytes, _ := json.Marshal(mainChunk)
-		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(mainBytes)))
-	}
-
-	finalChunk := utils.CreateChatCompletionChunk(completionID, "", model, &finishReason, "", &usage, nil)
-	finalBytes, _ := json.Marshal(finalChunk)
-	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(finalBytes)))
-	c.Writer.WriteString("data: [DONE]\n\n")
-	c.Writer.Flush()
-}
-
-func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool, retryFetch func(string) (io.ReadCloser, error)) {
-	respBody, _ := io.ReadAll(body)
-	events := strings.Split(string(respBody), "\n\n")
-
-	var inThinking bool
-	var inToolCall bool
-	var sentToolCallName bool
-	var currentToolID string
-	var toolCallIndex int
-	var toolCallBuffer strings.Builder
-	var fullText strings.Builder
-	var reasoningText strings.Builder
-	var usage models.Usage
-
-	for _, event := range events {
-		if strings.TrimSpace(event) == "" {
-			continue
-		}
-		lines := strings.Split(event, "\n")
-		var eventType string
-		var dataBuffer strings.Builder
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "event:") {
-				eventType = strings.TrimSpace(trimmed[6:])
-			} else if strings.HasPrefix(trimmed, "data:") {
-				if dataBuffer.Len() > 0 {
-					dataBuffer.WriteString("\n")
-				}
-				dataBuffer.WriteString(strings.TrimSpace(trimmed[5:]))
-			}
-		}
-		if dataBuffer.Len() > 0 {
-			processEvent(c, eventType, dataBuffer.String(), completionID, model, false, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
-		}
-	}
-
-	cleanText, toolCalls := utils.ParseToolCalls(fullText.String())
-	toolCalls = utils.NormalizeToolCalls(toolCalls, availableTools)
-	terminalText, toolCalls := utils.ExtractTerminalToolContent(toolCalls)
-	if terminalText != "" {
-		if strings.TrimSpace(cleanText) != "" {
-			cleanText = strings.TrimSpace(cleanText) + "\n\n" + terminalText
-		} else {
-			cleanText = terminalText
-		}
-	}
-
-	if shouldRetryForMissingToolCall(cleanText, toolCalls, availableTools) && retryFetch != nil {
-		retryQuery := query + "\n\n[RETRY INSTRUCTION: Your previous response described an intended action instead of using a tool. If any inspection, search, file read, code search, or command execution is needed, respond now with ONLY one valid `<tool_call>` block using an exact available tool name. Do not explain your plan.]"
-		retryBody, err := retryFetch(retryQuery)
-		if err == nil {
-			defer retryBody.Close()
-			processNonStream(c, retryBody, completionID, model, cacheKey, userID, retryQuery, availableTools, nil)
-			return
-		}
-		fmt.Printf("Tool-call retry failed: %v\n", err)
-	}
-	
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
@@ -1227,19 +1066,7 @@ var (
 	reToolArgsStart  = regexp.MustCompile(`[{\["tfn\d]`)
 	reTrailingBrace  = regexp.MustCompile(`\s*}$`)
 	reAltTrailingTag = regexp.MustCompile(`\s*</\w+>$`)
-	reIntentOnly     = regexp.MustCompile(`(?i)\b(let me|i('| wi)?ll|first|to start|i need to|i should|i'm going to)\b.*\b(explore|inspect|check|review|look at|analy[sz]e|search|read|understand)\b`)
 )
-
-func shouldRetryForMissingToolCall(cleanText string, toolCalls []models.ToolCall, availableTools []models.Tool) bool {
-	if len(availableTools) == 0 || len(toolCalls) > 0 {
-		return false
-	}
-	text := strings.TrimSpace(cleanText)
-	if text == "" {
-		return false
-	}
-	return reIntentOnly.MatchString(text)
-}
 
 func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
 	if eventType == "usage" {

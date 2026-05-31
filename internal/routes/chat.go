@@ -387,18 +387,22 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	toolInstructions := utils.FormatToolsAsInstructions(input.Tools)
+	sessionHandle := strings.TrimSpace(input.User)
+	if sessionHandle == "" {
+		sessionHandle = services.GenerateFingerprint(input.Messages)
+	}
 
-	if input.User != "" {
-		if pending, found := services.GlobalCache.Get("pending_tools_" + input.User); found {
+	if sessionHandle != "" {
+		if pending, found := services.GlobalCache.Get("pending_tools_" + sessionHandle); found {
 			if pendingTools, ok := pending.([]models.ToolCall); ok && len(pendingTools) > 0 {
 				lastMsg := input.Messages[len(input.Messages)-1]
 				if lastMsg.Role == "tool" {
 					nextTool := pendingTools[0]
 					remaining := pendingTools[1:]
 					if len(remaining) > 0 {
-						services.GlobalCache.Set("pending_tools_"+input.User, remaining, 10*time.Minute)
+						services.GlobalCache.Set("pending_tools_"+sessionHandle, remaining, 10*time.Minute)
 					} else {
-						services.GlobalCache.Delete("pending_tools_" + input.User)
+						services.GlobalCache.Delete("pending_tools_" + sessionHandle)
 					}
 
 					response := models.ChatCompletionChunk{
@@ -462,7 +466,7 @@ func handleChatCompletions(c *gin.Context) {
 					return
 				}
 
-				services.GlobalCache.Delete("pending_tools_" + input.User)
+				services.GlobalCache.Delete("pending_tools_" + sessionHandle)
 			}
 		}
 	}
@@ -470,17 +474,26 @@ func handleChatCompletions(c *gin.Context) {
 	var query string
 	convID := strings.TrimSpace(input.User)
 
-	if convID == "" {
-		// OpenAI-style clients already send the conversation window in messages.
-		// Reusing Xiaomi sessions by heuristic fingerprint makes unrelated tasks bleed together.
-		convID = utils.GenerateID()
-		auth, authErr := services.GetSelectedAuth()
-		if authErr == nil {
-			if err := services.CreateConversation(auth, convID); err != nil {
-				fmt.Printf("Failed to register fresh conversation with Xiaomi: %v\n", err)
+	if convID == "" && sessionHandle != "" {
+		if cachedID, found := services.GlobalCache.Get(sessionHandle); found {
+			convID = cachedID.(string)
+			fmt.Printf("Detected existing session via fingerprint: %s\n", convID)
+		} else if storedID, err := services.GetSession(sessionHandle); err == nil && storedID != "" {
+			convID = storedID
+			services.GlobalCache.Set(sessionHandle, convID, 24*time.Hour)
+			fmt.Printf("Detected existing session via database fingerprint: %s\n", convID)
+		} else {
+			convID = utils.GenerateID()
+			services.GlobalCache.Set(sessionHandle, convID, 24*time.Hour)
+			_ = services.SaveSession(sessionHandle, convID)
+			auth, authErr := services.GetSelectedAuth()
+			if authErr == nil {
+				if err := services.CreateConversation(auth, convID); err != nil {
+					fmt.Printf("Failed to register conversation with Xiaomi: %v\n", err)
+				}
 			}
+			fmt.Printf("Started and registered new session for fingerprint: %s\n", convID)
 		}
-		fmt.Printf("Started fresh request-scoped session: %s\n", convID)
 	}
 
 	if convID != "" {

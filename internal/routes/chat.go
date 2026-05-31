@@ -18,6 +18,7 @@ import (
 	"mimoproxy/internal/services"
 	"mimoproxy/internal/utils"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -141,7 +142,7 @@ func handleDirectProxy(c *gin.Context) {
 		return
 	}
 
-	url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", auth.Ph)
+	url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
 
 	body, _ := io.ReadAll(c.Request.Body)
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
@@ -757,7 +758,7 @@ func handleChatCompletions(c *gin.Context) {
 			utils.SendError(c, http.StatusInternalServerError, "Invalid Xiaomi auth configuration", "server_error", nil)
 			return
 		}
-		url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", auth.Ph)
+		url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
 		
 		payloadBytes, _ := json.Marshal(payload)
 		fmt.Printf("[%s] Chat Request: %d bytes | Model: %s | Media: %d\n", 

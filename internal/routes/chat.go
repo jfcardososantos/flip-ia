@@ -269,35 +269,123 @@ func handleGetHistory(c *gin.Context) {
 	})
 }
 
-func buildRecentConversationQuery(messages []models.Message, systemContent string, toolInstructions string, maxMessages int) string {
-	if maxMessages <= 0 {
-		maxMessages = 1
+func syncConversationMessages(convID string, messages []models.Message) {
+	if convID == "" {
+		return
 	}
 
-	start := len(messages) - maxMessages
-	if start < 0 {
-		start = 0
-	}
-
-	var processedMessages []string
-	for i := start; i < len(messages); i++ {
-		if messages[i].Role == "system" {
+	occurrences := make(map[string]int)
+	for _, message := range messages {
+		if message.Role == "system" {
 			continue
 		}
-		formatted := utils.FormatMessageForMiMo(messages[i])
+		content := utils.FormatMessageForMiMo(message)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		key := message.Role + "\x00" + content
+		occurrences[key]++
+		msgID := services.StableMessageID(convID, message.Role, content, occurrences[key])
+		_ = services.SaveMessageIfMissing(convID, msgID, message.Role, content)
+	}
+}
+
+func mergeConversationMessages(localMessages []models.Message, requestMessages []models.Message) []models.Message {
+	filteredRequest := make([]models.Message, 0, len(requestMessages))
+	for _, message := range requestMessages {
+		if message.Role == "system" {
+			continue
+		}
+		if strings.TrimSpace(utils.FormatMessageForMiMo(message)) == "" {
+			continue
+		}
+		filteredRequest = append(filteredRequest, message)
+	}
+
+	if len(localMessages) == 0 {
+		return filteredRequest
+	}
+	if len(filteredRequest) == 0 {
+		return localMessages
+	}
+
+	maxOverlap := 0
+	maxCheck := len(localMessages)
+	if len(filteredRequest) < maxCheck {
+		maxCheck = len(filteredRequest)
+	}
+
+	for overlap := maxCheck; overlap >= 1; overlap-- {
+		match := true
+		for i := 0; i < overlap; i++ {
+			local := localMessages[len(localMessages)-overlap+i]
+			req := filteredRequest[i]
+			if local.Role != req.Role || utils.FormatMessageForMiMo(local) != utils.FormatMessageForMiMo(req) {
+				match = false
+				break
+			}
+		}
+		if match {
+			maxOverlap = overlap
+			break
+		}
+	}
+
+	merged := append([]models.Message{}, localMessages...)
+	merged = append(merged, filteredRequest[maxOverlap:]...)
+	return merged
+}
+
+func buildConversationQuery(messages []models.Message, toolInstructions string) string {
+	var processedMessages []string
+	var systemPrompt string
+
+	for _, message := range messages {
+		if message.Role == "system" {
+			systemPrompt = services.ExtractText(message.Content, false) + toolInstructions
+			break
+		}
+	}
+
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		formatted := utils.FormatMessageForMiMo(message)
 		if strings.TrimSpace(formatted) != "" {
 			processedMessages = append(processedMessages, formatted)
 		}
 	}
 
-	body := strings.Join(processedMessages, "\n\n")
-	if systemContent != "" {
-		return fmt.Sprintf("%s%s\n\n%s", systemContent, toolInstructions, body)
+	if systemPrompt != "" {
+		return systemPrompt + "\n\n" + strings.Join(processedMessages, "\n\n")
 	}
 	if toolInstructions != "" {
-		return fmt.Sprintf("System: %s\n\n%s", strings.TrimSpace(toolInstructions), body)
+		return strings.TrimSpace(toolInstructions) + "\n\n" + strings.Join(processedMessages, "\n\n")
 	}
-	return body
+	return strings.Join(processedMessages, "\n\n")
+}
+
+func truncateConversationQuery(query string, systemPrefix string, maxChars int) string {
+	if maxChars <= 0 || len(query) <= maxChars {
+		return query
+	}
+
+	truncated := query[len(query)-maxChars:]
+	if idx := strings.Index(truncated, "\n"); idx != -1 {
+		truncated = truncated[idx+1:]
+	}
+
+	if systemPrefix != "" && len(systemPrefix) >= 10 && !strings.Contains(truncated, systemPrefix[:10]) {
+		query = systemPrefix + "\n\n... (context truncated) ...\n\n" + truncated
+	} else {
+		query = truncated
+	}
+
+	if len(query) > maxChars+100000 {
+		query = query[:maxChars+100000]
+	}
+	return query
 }
 
 func handleChatCompletions(c *gin.Context) {
@@ -429,17 +517,18 @@ func handleChatCompletions(c *gin.Context) {
 	convID := input.User
 
 	if convID == "" && len(input.Messages) > 0 {
-		firstMsg := input.Messages[0].Role + ":" + services.ExtractText(input.Messages[0].Content, true)
-		if len(firstMsg) > 200 {
-			firstMsg = firstMsg[:200]
-		}
-		sessionKey := fmt.Sprintf("sess_%x", firstMsg)
+		sessionKey := services.GenerateFingerprint(input.Messages)
 		if cachedID, found := services.GlobalCache.Get(sessionKey); found {
 			convID = cachedID.(string)
 			fmt.Printf("Detected existing session via fingerprint: %s\n", convID)
+		} else if storedID, err := services.GetSession(sessionKey); err == nil && storedID != "" {
+			convID = storedID
+			services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
+			fmt.Printf("Detected existing session via database fingerprint: %s\n", convID)
 		} else {
 			convID = utils.GenerateID()
 			services.GlobalCache.Set(sessionKey, convID, 24*time.Hour)
+			_ = services.SaveSession(sessionKey, convID)
 			auth, authErr := services.GetSelectedAuth()
 			if authErr == nil {
 				if err := services.CreateConversation(auth, convID); err != nil {
@@ -466,79 +555,34 @@ func handleChatCompletions(c *gin.Context) {
 					}
 				}
 			}
+			localMsgs, _ = services.GetLocalHistory(convID)
 		}
 
-		var systemContent string
-		for _, m := range input.Messages {
-			if m.Role == "system" {
-				systemContent = services.ExtractText(m.Content, false)
-				break
-			}
-		}
+		syncConversationMessages(convID, input.Messages)
+		localMsgs, _ = services.GetLocalHistory(convID)
+		mergedMessages := mergeConversationMessages(localMsgs, input.Messages)
 
-		lastMessage := input.Messages[len(input.Messages)-1]
-		lastMessageText := utils.FormatMessageForMiMo(lastMessage)
-		saveRole := lastMessage.Role
-		if saveRole == "" {
-			saveRole = "user"
+		queryMessages := mergedMessages
+		if len(queryMessages) == 0 {
+			queryMessages = input.Messages
 		}
-		services.SaveMessage(convID, saveRole+"_"+utils.GenerateID(), saveRole, lastMessageText)
-
-		if len(input.Messages) > 1 {
-			query = buildRecentConversationQuery(input.Messages, systemContent, toolInstructions, 4)
-		} else if systemContent != "" {
-			query = fmt.Sprintf("%s%s\n\n%s", systemContent, toolInstructions, lastMessageText)
-		} else if toolInstructions != "" {
-			query = fmt.Sprintf("System: %s\n\n%s", strings.TrimSpace(toolInstructions), lastMessageText)
-		} else {
-			query = lastMessageText
-		}
+		query = buildConversationQuery(queryMessages, toolInstructions)
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
 		query = utils.FormatMessageForMiMo(lastMessage)
 	} else {
-		var processedMessages []string
-		var systemPrompt string
+		query = buildConversationQuery(input.Messages, toolInstructions)
+	}
 
+	if len(input.Messages) > 1 {
+		systemPrefix := ""
 		for _, m := range input.Messages {
 			if m.Role == "system" {
-				systemPrompt = services.ExtractText(m.Content, false) + toolInstructions
+				systemPrefix = services.ExtractText(m.Content, false) + toolInstructions
 				break
 			}
 		}
-
-		for _, m := range input.Messages {
-			if m.Role == "system" {
-				continue
-			}
-			processedMessages = append(processedMessages, utils.FormatMessageForMiMo(m))
-		}
-
-		if systemPrompt != "" {
-			query = systemPrompt + "\n\n" + strings.Join(processedMessages, "\n\n")
-		} else if toolInstructions != "" {
-			query = strings.TrimSpace(toolInstructions) + "\n\n" + strings.Join(processedMessages, "\n\n")
-		} else {
-			query = strings.Join(processedMessages, "\n\n")
-		}
-
-		maxChars := 4000000
-		if len(query) > maxChars {
-			truncated := query[len(query)-maxChars:]
-			if idx := strings.Index(truncated, "\n"); idx != -1 {
-				truncated = truncated[idx+1:]
-			}
-
-			if systemPrompt != "" && len(systemPrompt) >= 10 && !strings.Contains(truncated, systemPrompt[:10]) {
-				query = systemPrompt + "\n\n... (context truncated) ...\n\n" + truncated
-			} else {
-				query = truncated
-			}
-
-			if len(query) > 4100000 {
-				query = query[:4100000]
-			}
-		}
+		query = truncateConversationQuery(query, systemPrefix, 4000000)
 	}
 
 	targetModel := strings.TrimSpace(input.Model)

@@ -7,7 +7,9 @@
 package services
 
 import (
+	"crypto/md5"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"mimoproxy/internal/models"
@@ -81,8 +83,17 @@ func SaveMessage(convID, msgID, role, content string) error {
 	return err
 }
 
+func SaveMessageIfMissing(convID, msgID, role, content string) error {
+	if convID == "" {
+		return nil
+	}
+	query := `INSERT OR IGNORE INTO messages (conversation_id, msg_id, role, content) VALUES (?, ?, ?, ?)`
+	_, err := DB.Exec(query, convID, msgID, role, content)
+	return err
+}
+
 func GetLocalHistory(convID string) ([]models.Message, error) {
-	query := `SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`
+	query := `SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC`
 	rows, err := DB.Query(query, convID)
 	if err != nil {
 		return nil, err
@@ -98,6 +109,11 @@ func GetLocalHistory(convID string) ([]models.Message, error) {
 		messages = append(messages, m)
 	}
 	return messages, nil
+}
+
+func StableMessageID(convID, role, content string, occurrence int) string {
+	sum := md5.Sum([]byte(fmt.Sprintf("%s|%s|%s|%d", convID, role, content, occurrence)))
+	return "sync_" + hex.EncodeToString(sum[:])
 }
 
 func SaveSession(fingerprint, convID string) error {

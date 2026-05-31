@@ -932,6 +932,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	var inThinking bool
 	var inToolCall bool
 	var sentToolCallName bool
+	var streamedToolCall bool
 	var currentToolID string
 	var toolCallIndex int
 	var toolCallBuffer strings.Builder
@@ -955,7 +956,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 		if trimmedLine == "" {
 			// Dispatch event
 			if dataBuffer.Len() > 0 {
-				processEvent(c, eventType, dataBuffer.String(), completionID, model, true, suppressTextStreaming, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
+				processEvent(c, eventType, dataBuffer.String(), completionID, model, true, suppressTextStreaming, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &streamedToolCall, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
 				dataBuffer.Reset()
 				eventType = ""
 			}
@@ -977,10 +978,18 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 		if err != nil {
 			// Last line without newline
 			if dataBuffer.Len() > 0 {
-				processEvent(c, eventType, dataBuffer.String(), completionID, model, true, suppressTextStreaming, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
+				processEvent(c, eventType, dataBuffer.String(), completionID, model, true, suppressTextStreaming, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &streamedToolCall, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
 			}
 			break
 		}
+	}
+
+	if inToolCall && toolCallBuffer.Len() > 0 {
+		fullText.WriteString("<tool_call>")
+		fullText.WriteString(toolCallBuffer.String())
+		fullText.WriteString("</tool_call>")
+		inToolCall = false
+		toolCallBuffer.Reset()
 	}
 
 	// Only interpret tool-call syntax when the client explicitly provided tools.
@@ -998,6 +1007,12 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	}
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
+		if !legacyCompletions && !streamedToolCall {
+			chunk := utils.CreateChatCompletionChunk(completionID, "", model, nil, "", nil, toolCalls)
+			b, _ := json.Marshal(chunk)
+			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+			c.Writer.Flush()
+		}
 		finishReason = "tool_calls"
 	} else if suppressTextStreaming {
 		content := strings.TrimSpace(fullText.String())
@@ -1050,6 +1065,7 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 	var inThinking bool
 	var inToolCall bool
 	var sentToolCallName bool
+	var streamedToolCall bool
 	var currentToolID string
 	var toolCallIndex int
 	var toolCallBuffer strings.Builder
@@ -1076,8 +1092,16 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 			}
 		}
 		if dataBuffer.Len() > 0 {
-			processEvent(c, eventType, dataBuffer.String(), completionID, model, false, false, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
+			processEvent(c, eventType, dataBuffer.String(), completionID, model, false, false, legacyCompletions, &inThinking, &inToolCall, &sentToolCallName, &streamedToolCall, &currentToolID, &toolCallIndex, &toolCallBuffer, &fullText, &reasoningText, &usage)
 		}
+	}
+
+	if inToolCall && toolCallBuffer.Len() > 0 {
+		fullText.WriteString("<tool_call>")
+		fullText.WriteString(toolCallBuffer.String())
+		fullText.WriteString("</tool_call>")
+		inToolCall = false
+		toolCallBuffer.Reset()
 	}
 
 	cleanText := strings.TrimSpace(fullText.String())
@@ -1206,7 +1230,7 @@ var (
 	reAltTrailingTag = regexp.MustCompile(`\s*</\w+>$`)
 )
 
-func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, suppressTextStreaming bool, legacyCompletions bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
+func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, suppressTextStreaming bool, legacyCompletions bool, inThinking, inToolCall, sentToolCallName, streamedToolCall *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
 	writeStreamText := func(text string, reasoning bool) {
 		if !isStreaming || suppressTextStreaming || text == "" {
 			return
@@ -1322,6 +1346,7 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 					if name != "" {
 						*currentToolID = "call_" + utils.GenerateID()
 						*sentToolCallName = true
+						*streamedToolCall = true
 
 						initialToolCalls := []models.ToolCall{
 							{
@@ -1371,6 +1396,7 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 						delta = reAltTrailingTag.ReplaceAllString(delta, "")
 					}
 					if delta != "" {
+						*streamedToolCall = true
 						argChunk := []models.ToolCall{
 							{
 								Index: *toolCallIndex,

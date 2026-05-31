@@ -40,7 +40,8 @@ func FormatToolsAsInstructions(tools []models.Tool) string {
 	return sb.String()
 }
 
-// ParseToolCalls only parses explicit <tool_call> blocks and leaves all other output untouched.
+// ParseToolCalls parses explicit tool-call blocks and a couple of low-risk variants,
+// but does not rename tools or rewrite arguments.
 func ParseToolCalls(text string) (string, []models.ToolCall) {
 	var toolCalls []models.ToolCall
 	cleanText := text
@@ -84,6 +85,65 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 			},
 		})
 		cleanText = strings.Replace(cleanText, match[0], "", 1)
+	}
+
+	if len(toolCalls) == 0 {
+		altRegex := regexp.MustCompile(`(?s)<([A-Za-z_][\w\-]*)>(.*?)</\1>`)
+		altMatches := altRegex.FindAllStringSubmatch(text, -1)
+		for _, match := range altMatches {
+			if len(match) < 3 {
+				continue
+			}
+			toolName := strings.TrimSpace(match[1])
+			if strings.EqualFold(toolName, "tool_call") {
+				continue
+			}
+			argsStr := strings.TrimSpace(match[2])
+			toolCalls = append(toolCalls, models.ToolCall{
+				ID:   "call_" + GenerateID(),
+				Type: "function",
+				Function: models.ToolFunction{
+					Name:      toolName,
+					Arguments: argsStr,
+				},
+			})
+			cleanText = strings.Replace(cleanText, match[0], "", 1)
+		}
+	}
+
+	if len(toolCalls) == 0 {
+		trimmedText := strings.TrimSpace(text)
+		jsonBlockRegex := regexp.MustCompile(`(?s)\x60\x60\x60(?:json)?\s*({.*?})\s*\x60\x60\x60`)
+		jsonMatch := jsonBlockRegex.FindStringSubmatch(trimmedText)
+		if len(jsonMatch) >= 2 {
+			trimmedText = jsonMatch[1]
+		}
+
+		if strings.HasPrefix(trimmedText, "{") && strings.HasSuffix(trimmedText, "}") {
+			var toolCallData struct {
+				Name      string      `json:"name"`
+				Arguments interface{} `json:"arguments"`
+			}
+			if err := json.Unmarshal([]byte(trimmedText), &toolCallData); err == nil && toolCallData.Name != "" {
+				var argsStr string
+				switch v := toolCallData.Arguments.(type) {
+				case string:
+					argsStr = v
+				default:
+					b, _ := json.Marshal(v)
+					argsStr = string(b)
+				}
+				toolCalls = append(toolCalls, models.ToolCall{
+					ID:   "call_" + GenerateID(),
+					Type: "function",
+					Function: models.ToolFunction{
+						Name:      toolCallData.Name,
+						Arguments: argsStr,
+					},
+				})
+				cleanText = ""
+			}
+		}
 	}
 
 	return strings.TrimSpace(cleanText), toolCalls

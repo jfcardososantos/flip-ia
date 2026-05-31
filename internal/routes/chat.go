@@ -647,7 +647,7 @@ func handleChatCompletions(c *gin.Context) {
 		
 		// Add a final reminder at the very end of the user's message to ensure strict tool usage
 		if toolInstructions != "" && !strings.Contains(lastMessageText, "SYSTEM REMINDER") {
-			query += "\n\n[SYSTEM REMINDER: You must ONLY respond with a `<tool_call>` XML block if you need to take an action, or use `attempt_completion` if finished. Do NOT output conversational text.]"
+			query += "\n\n[SYSTEM REMINDER: If you need to take an action, respond ONLY with a `<tool_call>` block using one exact tool name from the available tools list. If no tool is needed, answer normally in plain text.]"
 		}
 	} else if len(input.Messages) <= 1 {
 		lastMessage := input.Messages[len(input.Messages)-1]
@@ -687,7 +687,7 @@ func handleChatCompletions(c *gin.Context) {
 		}
 		
 		if toolInstructions != "" {
-			query += "\n\n[SYSTEM REMINDER: You must ONLY respond with a `<tool_call>` XML block if you need to take an action, or use `attempt_completion` if finished. Do NOT output conversational text.]"
+			query += "\n\n[SYSTEM REMINDER: If you need to take an action, respond ONLY with a `<tool_call>` block using one exact tool name from the available tools list. If no tool is needed, answer normally in plain text.]"
 		}
 
 		// Only truncate if we exceed the safety limit for payload stability
@@ -902,6 +902,11 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	// End of stream
 	toolCallStr, toolCalls := utils.ParseToolCalls(fullText.String())
 	toolCalls = utils.NormalizeToolCalls(toolCalls, availableTools)
+	terminalText, toolCalls := utils.ExtractTerminalToolContent(toolCalls)
+	if terminalText != "" {
+		fullText.Reset()
+		fullText.WriteString(terminalText)
+	}
 	_ = toolCallStr
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
@@ -968,6 +973,14 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 
 	cleanText, toolCalls := utils.ParseToolCalls(fullText.String())
 	toolCalls = utils.NormalizeToolCalls(toolCalls, availableTools)
+	terminalText, toolCalls := utils.ExtractTerminalToolContent(toolCalls)
+	if terminalText != "" {
+		if strings.TrimSpace(cleanText) != "" {
+			cleanText = strings.TrimSpace(cleanText) + "\n\n" + terminalText
+		} else {
+			cleanText = terminalText
+		}
+	}
 	
 	finishReason := "stop"
 	if len(toolCalls) > 0 {

@@ -29,7 +29,7 @@ func FormatToolsAsInstructions(tools []models.Tool) string {
 	sb.WriteString("Format:\n")
 	sb.WriteString("<tool_call>\n{\"name\": \"function_name\", \"arguments\": {\"arg1\": \"value1\"}}\n</tool_call>\n\n")
 	sb.WriteString("CRITICAL RULES:\n")
-	sb.WriteString("1. If you need to use a tool, output ONLY the `<tool_call>` block. Do NOT include any normal text explaining what you are doing. Do NOT output conversational text.\n")
+	sb.WriteString("1. If you need to use a tool, output ONLY the `<tool_call>` block. Do NOT include any normal text explaining what you are doing. Do NOT output conversational text in the same response as a tool call.\n")
 	sb.WriteString("2. You can only use ONE tool per response.\n")
 	sb.WriteString("3. Wait for the tool result before proceeding to the next step.\n")
 	sb.WriteString("4. You MUST use one of the exact tool names listed below. Never invent a new tool name.\n")
@@ -190,6 +190,60 @@ func NormalizeToolCalls(toolCalls []models.ToolCall, availableTools []models.Too
 	return toolCalls
 }
 
+func ExtractTerminalToolContent(toolCalls []models.ToolCall) (string, []models.ToolCall) {
+	if len(toolCalls) == 0 {
+		return "", toolCalls
+	}
+
+	var parts []string
+	filtered := make([]models.ToolCall, 0, len(toolCalls))
+
+	for _, call := range toolCalls {
+		name := strings.TrimSpace(strings.ToLower(call.Function.Name))
+		if !isTerminalPseudoTool(name) {
+			filtered = append(filtered, call)
+			continue
+		}
+
+		if text := extractTerminalText(call.Function.Arguments); text != "" {
+			parts = append(parts, text)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(parts, "\n\n")), filtered
+}
+
+func isTerminalPseudoTool(name string) bool {
+	switch name {
+	case "attempt_completion", "finish", "final", "final_answer", "done", "respond", "complete", "attemptcomplete":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractTerminalText(rawArgs string) string {
+	if strings.TrimSpace(rawArgs) == "" {
+		return ""
+	}
+
+	var asMap map[string]interface{}
+	if err := json.Unmarshal([]byte(rawArgs), &asMap); err == nil {
+		for _, key := range []string{"final_output", "result", "response", "answer", "content", "text", "message"} {
+			if val, ok := asMap[key].(string); ok && strings.TrimSpace(val) != "" {
+				return strings.TrimSpace(val)
+			}
+		}
+	}
+
+	var asString string
+	if err := json.Unmarshal([]byte(rawArgs), &asString); err == nil {
+		return strings.TrimSpace(asString)
+	}
+
+	return strings.TrimSpace(rawArgs)
+}
+
 func normalizeToolAlias(name string, rawArgs string, available map[string]models.ToolDefinition) (models.ToolFunction, bool) {
 	if _, ok := available["bash"]; !ok {
 		return models.ToolFunction{}, false
@@ -292,7 +346,7 @@ func FormatMessageForMiMo(message models.Message) string {
 				}
 			}
 		}
-		return fmt.Sprintf("\n<tool_result>\n%s\n</tool_result>\n\n[SYSTEM REMINDER: You must ONLY respond with a `<tool_call>` XML block if you need to take an action, or use `attempt_completion` if finished. Do NOT output conversational text.]\n", contentStr)
+		return fmt.Sprintf("\n<tool_result>\n%s\n</tool_result>\n\n[SYSTEM REMINDER: If you need to take an action, respond ONLY with a `<tool_call>` block using one exact tool name from the available tools list. If no tool is needed, answer normally in plain text.]\n", contentStr)
 	}
 
 	// Handle normal content and complex parts

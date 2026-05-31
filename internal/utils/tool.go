@@ -37,6 +37,7 @@ func FormatToolsAsInstructions(tools []models.Tool) string {
 	sb.WriteString("6. Do NOT say things like 'let me inspect', 'I'll explore', 'first I will check', or describe a future action. If inspection or execution is needed, call a tool immediately.\n")
 	sb.WriteString("7. If tools are available and the task requires reading files, searching code, running commands, or inspecting project structure, prefer a tool call over conversational text.\n")
 	sb.WriteString("8. Only answer in plain text when you are actually done or when no tool is needed.\n\n")
+	sb.WriteString(buildToolCompatibilityHints(tools))
 	sb.WriteString("Available tools:\n")
 
 	for _, tool := range tools {
@@ -49,6 +50,53 @@ func FormatToolsAsInstructions(tools []models.Tool) string {
 	}
 
 	return sb.String()
+}
+
+func buildToolCompatibilityHints(tools []models.Tool) string {
+	available := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		if tool.Type == "function" {
+			available[tool.Function.Name] = true
+		}
+	}
+
+	var hints []string
+	if available["read"] {
+		hints = append(hints, "- Use `read` for reading a file's contents. Prefer it over inventing names like `read_file`, `open_file`, or `cat_file`.")
+	}
+	if available["glob"] {
+		hints = append(hints, "- Use `glob` to discover files, enumerate project structure, or match files by pattern.")
+	}
+	if available["grep"] {
+		hints = append(hints, "- Use `grep` to search inside files for symbols, strings, functions, routes, or code patterns.")
+	}
+	if available["edit"] {
+		hints = append(hints, "- Use `edit` for targeted file modifications. Prefer it over inventing names like `apply_patch`, `modify_file`, or `replace_in_file`.")
+	}
+	if available["write"] {
+		hints = append(hints, "- Use `write` to create a new file or fully replace a file's contents.")
+	}
+	if available["bash"] {
+		hints = append(hints, "- Use `bash` for shell commands such as `npm install`, `git status`, `ls`, `head`, `tail`, `cat`, `find`, `sed`, `python`, `node`, and test commands.")
+	}
+	if available["task"] {
+		hints = append(hints, "- Use `task` when a subtask or delegated investigation is useful.")
+	}
+	if available["webfetch"] {
+		hints = append(hints, "- Use `webfetch` to retrieve a webpage or external documentation URL.")
+	}
+	if available["background_process"] {
+		hints = append(hints, "- Use `background_process` for long-running commands you should not block on.")
+	}
+	if available["agent_manager"] {
+		hints = append(hints, "- Use `agent_manager` only when multi-agent coordination is genuinely needed.")
+	}
+
+	if len(hints) == 0 {
+		return ""
+	}
+
+	return "Compatibility hints:\n" + strings.Join(hints, "\n") + "\n\n"
 }
 
 /**
@@ -341,9 +389,7 @@ func extractTerminalText(rawArgs string) string {
 }
 
 func normalizeToolAlias(name string, rawArgs string, available map[string]models.ToolDefinition) (models.ToolFunction, bool) {
-	if _, ok := available["bash"]; !ok {
-		return models.ToolFunction{}, false
-	}
+	name = strings.TrimSpace(strings.ToLower(name))
 
 	var args map[string]interface{}
 	_ = json.Unmarshal([]byte(rawArgs), &args)
@@ -354,6 +400,32 @@ func normalizeToolAlias(name string, rawArgs string, available map[string]models
 			return models.ToolFunction{}, false
 		}
 		return models.ToolFunction{Name: "bash", Arguments: string(payload)}, true
+	}
+	buildMapped := func(toolName string, payload map[string]interface{}) (models.ToolFunction, bool) {
+		if _, ok := available[toolName]; !ok {
+			return models.ToolFunction{}, false
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return models.ToolFunction{}, false
+		}
+		return models.ToolFunction{Name: toolName, Arguments: string(b)}, true
+	}
+	firstAny := func(keys ...string) interface{} {
+		for _, key := range keys {
+			if val, ok := args[key]; ok {
+				return val
+			}
+		}
+		return nil
+	}
+	copyIfPresent := func(dst map[string]interface{}, srcKeys ...string) {
+		for _, key := range srcKeys {
+			if val, ok := args[key]; ok {
+				dst[key] = val
+				return
+			}
+		}
 	}
 
 	pathKeys := []string{"path", "file_path", "filepath", "file"}
@@ -380,7 +452,92 @@ func normalizeToolAlias(name string, rawArgs string, available map[string]models
 	}
 
 	switch name {
+	case "read_file", "readfile", "open_file", "view_file", "cat_file":
+		path := firstString(pathKeys...)
+		if path == "" {
+			return models.ToolFunction{}, false
+		}
+		payload := map[string]interface{}{"file_path": path}
+		copyIfPresent(payload, "offset", "start_line", "line_start")
+		copyIfPresent(payload, "limit", "end_line", "line_end")
+		return buildMapped("read", payload)
+	case "list_files", "list_dir", "list_directory", "find_files", "glob_search", "search_files_by_pattern":
+		path := firstString("path", "dir", "directory")
+		pattern := firstString("pattern", "glob", "query")
+		if pattern == "" {
+			if path != "" {
+				pattern = strings.TrimRight(path, "/") + "/**/*"
+			} else {
+				pattern = "**/*"
+			}
+		}
+		payload := map[string]interface{}{"pattern": pattern}
+		if path != "" {
+			payload["path"] = path
+		}
+		return buildMapped("glob", payload)
+	case "search_code", "search_files", "ripgrep", "grep_search", "find_in_files":
+		pattern := firstString("pattern", "query", "search", "text", "regex")
+		path := firstString("path", "dir", "directory")
+		if pattern == "" {
+			return models.ToolFunction{}, false
+		}
+		payload := map[string]interface{}{"pattern": pattern}
+		if path != "" {
+			payload["path"] = path
+		}
+		copyIfPresent(payload, "include", "exclude")
+		return buildMapped("grep", payload)
+	case "write_file", "create_file", "save_file", "overwrite_file":
+		path := firstString(pathKeys...)
+		content, _ := firstAny("content", "text", "contents", "value").(string)
+		if path == "" {
+			return models.ToolFunction{}, false
+		}
+		payload := map[string]interface{}{"file_path": path, "content": content}
+		return buildMapped("write", payload)
+	case "edit_file", "modify_file", "replace_in_file", "apply_patch":
+		path := firstString(pathKeys...)
+		if path == "" {
+			return models.ToolFunction{}, false
+		}
+		payload := map[string]interface{}{"file_path": path}
+		for _, key := range []string{"old_string", "new_string", "replace_all", "instructions", "patch", "content"} {
+			if val, ok := args[key]; ok {
+				payload[key] = val
+			}
+		}
+		return buildMapped("edit", payload)
+	case "fetch_url", "browse_url", "open_url", "web_fetch":
+		target := firstString("url", "href", "target")
+		if target == "" {
+			return models.ToolFunction{}, false
+		}
+		payload := map[string]interface{}{"url": target}
+		return buildMapped("webfetch", payload)
+	case "delegate_task", "subtask", "run_subtask":
+		payload := map[string]interface{}{}
+		for _, key := range []string{"prompt", "task", "description", "goal"} {
+			if val, ok := args[key]; ok {
+				payload[key] = val
+				break
+			}
+		}
+		return buildMapped("task", payload)
+	case "run_in_background", "long_running_command", "background_command":
+		payload := map[string]interface{}{}
+		for _, key := range []string{"command", "cmd", "description", "workdir"} {
+			if val, ok := args[key]; ok {
+				payload[key] = val
+			}
+		}
+		return buildMapped("background_process", payload)
+	case "manage_agents", "spawn_agent", "multi_agent":
+		return buildMapped("agent_manager", args)
 	case "head":
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
 		path := firstString(pathKeys...)
 		if path == "" {
 			return models.ToolFunction{}, false
@@ -391,6 +548,9 @@ func normalizeToolAlias(name string, rawArgs string, available map[string]models
 		}
 		return buildBash(fmt.Sprintf("head -n %d %s", lines, strconv.Quote(path)))
 	case "tail":
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
 		path := firstString(pathKeys...)
 		if path == "" {
 			return models.ToolFunction{}, false
@@ -401,19 +561,73 @@ func normalizeToolAlias(name string, rawArgs string, available map[string]models
 		}
 		return buildBash(fmt.Sprintf("tail -n %d %s", lines, strconv.Quote(path)))
 	case "cat":
+		if _, ok := available["read"]; ok {
+			path := firstString(pathKeys...)
+			if path != "" {
+				return buildMapped("read", map[string]interface{}{"file_path": path})
+			}
+		}
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
 		path := firstString(pathKeys...)
 		if path == "" {
 			return models.ToolFunction{}, false
 		}
 		return buildBash(fmt.Sprintf("cat %s", strconv.Quote(path)))
 	case "ls":
+		if _, ok := available["glob"]; ok {
+			path := firstString("path", "dir", "directory")
+			if path == "" {
+				path = "."
+			}
+			return buildMapped("glob", map[string]interface{}{"pattern": strings.TrimRight(path, "/") + "/**/*", "path": path})
+		}
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
 		path := firstString("path", "dir", "directory")
 		if path == "" {
 			path = "."
 		}
 		return buildBash(fmt.Sprintf("ls -la %s", strconv.Quote(path)))
 	case "pwd":
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
 		return buildBash("pwd")
+	case "find":
+		if _, ok := available["glob"]; ok {
+			path := firstString("path", "dir", "directory")
+			pattern := firstString("pattern", "name", "query", "glob")
+			if path == "" {
+				path = "."
+			}
+			if pattern == "" {
+				pattern = "**/*"
+			}
+			return buildMapped("glob", map[string]interface{}{"pattern": pattern, "path": path})
+		}
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
+		path := firstString("path", "dir", "directory")
+		if path == "" {
+			path = "."
+		}
+		return buildBash(fmt.Sprintf("find %s", strconv.Quote(path)))
+	case "sed", "awk", "npm", "node", "python", "pytest", "go", "git", "cargo", "pnpm", "yarn":
+		if _, ok := available["bash"]; !ok {
+			return models.ToolFunction{}, false
+		}
+		command := firstString("command", "cmd")
+		if command == "" {
+			command = name
+			if value := firstString("args", "arguments"); value != "" {
+				command += " " + value
+			}
+		}
+		return buildBash(command)
 	}
 
 	return models.ToolFunction{}, false

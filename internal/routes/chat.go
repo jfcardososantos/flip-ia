@@ -68,6 +68,30 @@ func GetStats() (map[string]int, map[string]int, []int64) {
 	return stats, usage, times
 }
 
+func sendMimoChatRequest(auth models.Auth, payload models.MimoPayload, customHeaders map[string]string, completionID string) (*http.Response, error) {
+	url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
+
+	payloadBytes, _ := json.Marshal(payload)
+	fmt.Printf("[%s] Chat Request: %d bytes | Model: %s | Media: %d\n",
+		completionID, len(payloadBytes), payload.ModelConfig.Model, len(payload.MultiMedias))
+
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
+	headers := services.GetOfficialHeaders(auth, customHeaders)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	startTime := time.Now()
+	resp, err := services.GlobalHTTPClient.Do(req)
+	if err == nil {
+		fmt.Printf("Xiaomi Response Status: %s (Duration: %v)\n", resp.Status, time.Since(startTime))
+		if resp.StatusCode == http.StatusOK {
+			AddResponseTime(time.Since(startTime).Milliseconds())
+		}
+	}
+	return resp, err
+}
+
 func RegisterChatRoutes(r *gin.Engine, authMiddleware gin.HandlerFunc) {
 	v1 := r.Group("/v1")
 	if authMiddleware != nil {
@@ -750,6 +774,10 @@ func handleChatCompletions(c *gin.Context) {
 
 	var resp *http.Response
 	var auth models.Auth
+	customHeaders := make(map[string]string)
+	for k, v := range c.Request.Header {
+		customHeaders[strings.ToLower(k)] = v[0]
+	}
 
 	for i := 0; i < maxRetries; i++ {
 		auth, err = services.GetSelectedAuth()
@@ -758,26 +786,8 @@ func handleChatCompletions(c *gin.Context) {
 			utils.SendError(c, http.StatusInternalServerError, "Invalid Xiaomi auth configuration", "server_error", nil)
 			return
 		}
-		url := fmt.Sprintf("https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=%s", url.QueryEscape(auth.Ph))
-		
-		payloadBytes, _ := json.Marshal(payload)
-		fmt.Printf("[%s] Chat Request: %d bytes | Model: %s | Media: %d\n", 
-			completionID, len(payloadBytes), payload.ModelConfig.Model, len(payload.MultiMedias))
-		
-		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
-		customHeaders := make(map[string]string)
-		for k, v := range c.Request.Header {
-			customHeaders[strings.ToLower(k)] = v[0]
-		}
-		headers := services.GetOfficialHeaders(auth, customHeaders)
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-
-		startTime := time.Now()
-		resp, err = services.GlobalHTTPClient.Do(req)
+		resp, err = sendMimoChatRequest(auth, payload, customHeaders, completionID)
 		if err == nil {
-			fmt.Printf("Xiaomi Response Status: %s (Duration: %v)\n", resp.Status, time.Since(startTime))
 			if resp.StatusCode != http.StatusOK {
 				fmt.Printf("Xiaomi returned non-200 status: %d\n", resp.StatusCode)
 				// If not 200, we might want to retry or just fail
@@ -791,7 +801,6 @@ func handleChatCompletions(c *gin.Context) {
 				c.JSON(resp.StatusCode, gin.H{"error": "Xiaomi API error", "status": resp.StatusCode, "details": string(body)})
 				return
 			}
-			AddResponseTime(time.Since(startTime).Milliseconds())
 			break
 		}
 		
@@ -837,7 +846,20 @@ func handleChatCompletions(c *gin.Context) {
 
 		processStream(c, bodyReader, completionID, targetModel, payload.ConversationID, query, input.Tools)
 	} else {
-		processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools)
+		processNonStream(c, bodyReader, completionID, targetModel, cacheKey, payload.ConversationID, query, input.Tools, func(retryQuery string) (io.ReadCloser, error) {
+			retryPayload := payload
+			retryPayload.Query = retryQuery
+			retryResp, retryErr := sendMimoChatRequest(auth, retryPayload, customHeaders, completionID+"_retry")
+			if retryErr != nil {
+				return nil, retryErr
+			}
+			if retryResp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(retryResp.Body)
+				retryResp.Body.Close()
+				return nil, fmt.Errorf("Xiaomi retry API error: %d - %s", retryResp.StatusCode, string(body))
+			}
+			return retryResp.Body, nil
+		})
 	}
 }
 
@@ -934,7 +956,7 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	c.Writer.Flush()
 }
 
-func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool) {
+func processNonStream(c *gin.Context, body io.Reader, completionID, model string, cacheKey string, userID string, query string, availableTools []models.Tool, retryFetch func(string) (io.ReadCloser, error)) {
 	respBody, _ := io.ReadAll(body)
 	events := strings.Split(string(respBody), "\n\n")
 
@@ -980,6 +1002,17 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		} else {
 			cleanText = terminalText
 		}
+	}
+
+	if shouldRetryForMissingToolCall(cleanText, toolCalls, availableTools) && retryFetch != nil {
+		retryQuery := query + "\n\n[RETRY INSTRUCTION: Your previous response described an intended action instead of using a tool. If any inspection, search, file read, code search, or command execution is needed, respond now with ONLY one valid `<tool_call>` block using an exact available tool name. Do not explain your plan.]"
+		retryBody, err := retryFetch(retryQuery)
+		if err == nil {
+			defer retryBody.Close()
+			processNonStream(c, retryBody, completionID, model, cacheKey, userID, retryQuery, availableTools, nil)
+			return
+		}
+		fmt.Printf("Tool-call retry failed: %v\n", err)
 	}
 	
 	finishReason := "stop"
@@ -1066,7 +1099,19 @@ var (
 	reToolArgsStart  = regexp.MustCompile(`[{\["tfn\d]`)
 	reTrailingBrace  = regexp.MustCompile(`\s*}$`)
 	reAltTrailingTag = regexp.MustCompile(`\s*</\w+>$`)
+	reIntentOnly     = regexp.MustCompile(`(?i)\b(let me|i('| wi)?ll|first|to start|i need to|i should|i'm going to)\b.*\b(explore|inspect|check|review|look at|analy[sz]e|search|read|understand)\b`)
 )
+
+func shouldRetryForMissingToolCall(cleanText string, toolCalls []models.ToolCall, availableTools []models.Tool) bool {
+	if len(availableTools) == 0 || len(toolCalls) > 0 {
+		return false
+	}
+	text := strings.TrimSpace(cleanText)
+	if text == "" {
+		return false
+	}
+	return reIntentOnly.MatchString(text)
+}
 
 func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
 	if eventType == "usage" {

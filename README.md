@@ -9,6 +9,7 @@ O **Mimo AI Proxy** não é apenas uma camada de tradução; é um gateway compl
 ## Funcionalidades Principais
 
 - **OpenAI Standard Gateway**: Implementação completa dos endpoints `/v1/chat/completions`, `/v1/completions` e `/v1/models`.
+- **Ollama Compatibility Layer**: Endpoints `/api/chat`, `/api/generate`, `/api/tags` e `/api/version` com resposta no padrão Ollama, incluindo `stream` via NDJSON.
 - **Inteligência de Sessão**: 
   - Detecção automática de conversas via fingerprinting de mensagens.
   - Sincronização bi-direcional com o histórico oficial da Xiaomi.
@@ -45,6 +46,7 @@ O **Mimo AI Proxy** não é apenas uma camada de tradução; é um gateway compl
    - Se você não quiser manter esses 3 valores manualmente, use a extensão do navegador para importar a sessão logada da Xiaomi.
    - O proxy também aceita `XIAOMI_COOKIE` bruto e salva sessões importadas em `data/auth.json`.
    - Os endpoints compatíveis com OpenAI continuam os mesmos, principalmente `POST /v1/chat/completions`.
+   - Agora também há compatibilidade com clientes Ollama via `POST /api/chat` e `POST /api/generate`.
 
 ## Como usar
 
@@ -68,6 +70,17 @@ curl http://localhost:3000/v1/chat/completions \
     "messages": [{"role": "user", "content": "Explique a teoria da relatividade."}],
     "stream": true,
     "web_search": true
+  }'
+```
+
+### Exemplo Ollama
+```bash
+curl http://localhost:3000/api/chat \
+  -H "Authorization: Bearer sua_chave" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mimo-v2.5-pro",
+    "messages": [{"role": "user", "content": "Olá"}]
   }'
 ```
 

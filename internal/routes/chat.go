@@ -106,6 +106,7 @@ func RegisterChatRoutes(r *gin.Engine, authMiddleware gin.HandlerFunc) {
 	}
 
 	r.POST("/open-apis/bot/chat", handleDirectProxy)
+	registerOllamaRoutes(r, authMiddleware)
 }
 
 func handleModels(c *gin.Context) {

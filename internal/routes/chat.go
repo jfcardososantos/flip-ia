@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,8 @@ var (
 	ResponseTimes   = make([]int64, 0)
 	StatsMutex      sync.Mutex
 )
+
+var agentLocationOnlyRegex = regexp.MustCompile(`(?i)^\s*(?:/[^\n]+|[A-Za-z]:\\[^\n]+|\.{0,2}/[^\n]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)(?::|\s+)\d+(?::|\s+)\d+\s*$`)
 
 func AddResponseTime(t int64) {
 	StatsMutex.Lock()
@@ -1140,7 +1143,12 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 		return true
 	}
 
-	clean := strings.ToLower(strings.TrimSpace(result.CleanText))
+	rawClean := strings.TrimSpace(result.CleanText)
+	if agentLocationOnlyRegex.MatchString(rawClean) {
+		return true
+	}
+
+	clean := strings.ToLower(rawClean)
 	reasoning := strings.TrimSpace(result.ReasoningText)
 	if clean == "" && reasoning != "" {
 		return true
@@ -1181,8 +1189,9 @@ func buildAgentToolRetryQuery(originalQuery string, result parsedMimoChat) strin
 	var sb strings.Builder
 	sb.WriteString(originalQuery)
 	sb.WriteString("\n\n# Adapter correction\n")
-	sb.WriteString("Your previous response contained reasoning/planning but no tool call, so the IDE client could not do any work.\n")
-	sb.WriteString("Now respond with exactly one <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> block using one available tool. Do not write prose, do not say you will start, and do not use Markdown fences.\n")
+	sb.WriteString("Your previous response did not contain a tool call, so the IDE client could not continue the work.\n")
+	sb.WriteString("If work remains, respond with exactly one <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> block using one available tool. Do not write prose, do not output only a file location, and do not use Markdown fences.\n")
+	sb.WriteString("Only provide a final answer when all requested work is complete.\n")
 	if strings.TrimSpace(result.CleanText) != "" {
 		sb.WriteString("Previous non-action response: ")
 		sb.WriteString(strings.TrimSpace(result.CleanText))

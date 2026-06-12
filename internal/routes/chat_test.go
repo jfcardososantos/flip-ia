@@ -72,3 +72,36 @@ func TestSynthesizePathReadToolCalls(t *testing.T) {
 		t.Fatalf("unexpected arguments: %s", out.ToolCalls[1].Function.Arguments)
 	}
 }
+
+func TestSynthesizeReadCommandToolCalls(t *testing.T) {
+	result := parsedMimoChat{
+		CleanText:    "sed -n '82,95p' /Users/jfcardososantos/Documents/alfst-homepage/src/app/budget/page.tsx Read budget page lines 82-95 sed -n '84,97p' /Users/jfcardososantos/Documents/alfst-homepage/src/app/contact/page.tsx Read contact page lines 84-97",
+		FinishReason: "stop",
+	}
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "read",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"filePath": map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+	}}
+
+	out := synthesizePathReadToolCalls(result, tools, nil)
+	if out.FinishReason != "tool_calls" {
+		t.Fatalf("expected tool_calls finish reason, got %s", out.FinishReason)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(out.ToolCalls))
+	}
+	if !strings.Contains(out.ToolCalls[0].Function.Arguments, "budget/page.tsx") {
+		t.Fatalf("unexpected first arguments: %s", out.ToolCalls[0].Function.Arguments)
+	}
+	if !strings.Contains(out.ToolCalls[1].Function.Arguments, "contact/page.tsx") {
+		t.Fatalf("unexpected second arguments: %s", out.ToolCalls[1].Function.Arguments)
+	}
+}

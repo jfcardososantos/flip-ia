@@ -1145,6 +1145,9 @@ func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayloa
 func synthesizePathReadToolCalls(result parsedMimoChat, tools []models.Tool, parallelToolCalls *bool) parsedMimoChat {
 	paths := extractPathOnlyResponse(result.CleanText)
 	if len(paths) == 0 {
+		paths = extractReadCommandPaths(result.CleanText)
+	}
+	if len(paths) == 0 {
 		return parsedMimoChat{}
 	}
 
@@ -1172,6 +1175,42 @@ func synthesizePathReadToolCalls(result parsedMimoChat, tools []models.Tool, par
 	result.ResponseCalls = responseToolCalls(calls, parallelToolCalls, true)
 	result.FinishReason = "tool_calls"
 	return result
+}
+
+func extractReadCommandPaths(text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+
+	lowered := strings.ToLower(text)
+	readMarkers := []string{"sed -n ", "cat ", "head ", "tail "}
+	hasReadCommand := false
+	for _, marker := range readMarkers {
+		if strings.Contains(lowered, marker) {
+			hasReadCommand = true
+			break
+		}
+	}
+	if !hasReadCommand {
+		return nil
+	}
+
+	matches := agentPathLocationRegex.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	paths := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) <= 1 || seen[match[1]] {
+			continue
+		}
+		seen[match[1]] = true
+		paths = append(paths, match[1])
+	}
+	return paths
 }
 
 func extractPathOnlyResponse(text string) []string {
@@ -1252,7 +1291,7 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 	}
 
 	rawClean := strings.TrimSpace(result.CleanText)
-	if agentLocationOnlyRegex.MatchString(rawClean) || len(extractPathOnlyResponse(rawClean)) > 0 {
+	if agentLocationOnlyRegex.MatchString(rawClean) || len(extractPathOnlyResponse(rawClean)) > 0 || len(extractReadCommandPaths(rawClean)) > 0 {
 		return true
 	}
 

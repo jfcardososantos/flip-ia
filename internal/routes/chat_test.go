@@ -1,6 +1,10 @@
 package routes
 
-import "testing"
+import (
+	"mimoproxy/internal/models"
+	"strings"
+	"testing"
+)
 
 func TestAgentLocationOnlyRegex(t *testing.T) {
 	text := "/Users/jfcardososantos/Documents/alfst-homepage/src/app/budget/page.tsx 80 20"
@@ -11,5 +15,51 @@ func TestAgentLocationOnlyRegex(t *testing.T) {
 	final := "Alterei /Users/me/app/page.tsx e concluí os ajustes solicitados."
 	if agentLocationOnlyRegex.MatchString(final) {
 		t.Fatalf("expected normal final response not to match")
+	}
+}
+
+func TestExtractPathOnlyResponse(t *testing.T) {
+	text := "/Users/jfcardososantos/Documents/alfst-homepage/src/app/budget/page.tsx /Users/jfcardososantos/Documents/alfst-homepage/src/app/contact/page.tsx"
+	paths := extractPathOnlyResponse(text)
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 paths, got %d", len(paths))
+	}
+
+	final := "Concluí ajustes em /Users/me/app/page.tsx e /Users/me/app/contact/page.tsx."
+	if paths := extractPathOnlyResponse(final); len(paths) != 0 {
+		t.Fatalf("expected normal final response not to be path-only, got %+v", paths)
+	}
+}
+
+func TestSynthesizePathReadToolCalls(t *testing.T) {
+	result := parsedMimoChat{
+		CleanText:    "/tmp/app/page.tsx /tmp/app/contact/page.tsx",
+		FinishReason: "stop",
+	}
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "read",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"filePath": map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+	}}
+
+	out := synthesizePathReadToolCalls(result, tools, nil)
+	if out.FinishReason != "tool_calls" {
+		t.Fatalf("expected tool_calls finish reason, got %s", out.FinishReason)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].Function.Name != "read" {
+		t.Fatalf("unexpected tool name: %s", out.ToolCalls[0].Function.Name)
+	}
+	if !strings.Contains(out.ToolCalls[1].Function.Arguments, "contact/page.tsx") {
+		t.Fatalf("unexpected arguments: %s", out.ToolCalls[1].Function.Arguments)
 	}
 }

@@ -34,7 +34,10 @@ var (
 	StatsMutex      sync.Mutex
 )
 
-var agentLocationOnlyRegex = regexp.MustCompile(`(?i)^\s*(?:/[^\n]+|[A-Za-z]:\\[^\n]+|\.{0,2}/[^\n]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)(?::|\s+)\d+(?::|\s+)\d+\s*$`)
+var (
+	agentLocationOnlyRegex = regexp.MustCompile(`(?i)^\s*(?:/[^\n]+|[A-Za-z]:\\[^\n]+|\.{0,2}/[^\n]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)(?::|\s+)\d+(?::|\s+)\d+\s*$`)
+	agentPathTokenRegex    = regexp.MustCompile(`(?i)(?:/[^\s]+|[A-Za-z]:\\[^\s]+|\.{1,2}/[^\s]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)`)
+)
 
 func AddResponseTime(t int64) {
 	StatsMutex.Lock()
@@ -672,12 +675,12 @@ func handleChatCompletions(c *gin.Context) {
 		if rc := http.NewResponseController(c.Writer); rc != nil {
 			_ = rc.SetWriteDeadline(time.Time{})
 		}
-		processAgentStreamBuffered(c, resp, payload, customHeaders, completionID, targetModel, historyID, query, statToken, input.ParallelToolCalls, toolChoice)
+		processAgentStreamBuffered(c, resp, payload, customHeaders, completionID, targetModel, historyID, query, statToken, input.ParallelToolCalls, toolChoice, input.Tools)
 		return
 	}
 
 	if agentMode {
-		processAgentNonStreamBuffered(c, resp, payload, customHeaders, completionID, targetModel, cacheKey, historyID, query, statToken, input.ParallelToolCalls, toolChoice)
+		processAgentNonStreamBuffered(c, resp, payload, customHeaders, completionID, targetModel, cacheKey, historyID, query, statToken, input.ParallelToolCalls, toolChoice, input.Tools)
 		return
 	}
 
@@ -1026,7 +1029,7 @@ func parseMimoChatBody(body io.Reader, completionID, model, query string, parall
 	}
 }
 
-func processAgentStreamBuffered(c *gin.Context, firstResp *http.Response, payload models.MimoPayload, customHeaders map[string]string, completionID, model, userID, query, statToken string, parallelToolCalls *bool, toolChoice string) {
+func processAgentStreamBuffered(c *gin.Context, firstResp *http.Response, payload models.MimoPayload, customHeaders map[string]string, completionID, model, userID, query, statToken string, parallelToolCalls *bool, toolChoice string, tools []models.Tool) {
 	initialChunk := models.ChatCompletionChunk{
 		ID:      "chatcmpl-" + completionID,
 		Object:  "chat.completion.chunk",
@@ -1043,7 +1046,7 @@ func processAgentStreamBuffered(c *gin.Context, firstResp *http.Response, payloa
 	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(initialBytes)))
 	c.Writer.Flush()
 
-	result, statToken := runAgentSemanticRetries(firstResp, payload, customHeaders, completionID, model, query, statToken, parallelToolCalls, toolChoice)
+	result, statToken := runAgentSemanticRetries(firstResp, payload, customHeaders, completionID, model, query, statToken, parallelToolCalls, toolChoice, tools)
 	IncrementTokenStat(statToken, result.Usage.TotalTokens)
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", assistantTranscript(result.FullText, result.ReasoningText))
 
@@ -1065,8 +1068,8 @@ func processAgentStreamBuffered(c *gin.Context, firstResp *http.Response, payloa
 	utils.FinalizeChatStream(c, completionID, model, "stop", &result.Usage)
 }
 
-func processAgentNonStreamBuffered(c *gin.Context, firstResp *http.Response, payload models.MimoPayload, customHeaders map[string]string, completionID, model, cacheKey, userID, query, statToken string, parallelToolCalls *bool, toolChoice string) {
-	result, statToken := runAgentSemanticRetries(firstResp, payload, customHeaders, completionID, model, query, statToken, parallelToolCalls, toolChoice)
+func processAgentNonStreamBuffered(c *gin.Context, firstResp *http.Response, payload models.MimoPayload, customHeaders map[string]string, completionID, model, cacheKey, userID, query, statToken string, parallelToolCalls *bool, toolChoice string, tools []models.Tool) {
+	result, statToken := runAgentSemanticRetries(firstResp, payload, customHeaders, completionID, model, query, statToken, parallelToolCalls, toolChoice, tools)
 	IncrementTokenStat(statToken, result.Usage.TotalTokens)
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", assistantTranscript(result.FullText, result.ReasoningText))
 	if result.FinishReason == "tool_calls" {
@@ -1078,7 +1081,7 @@ func processAgentNonStreamBuffered(c *gin.Context, firstResp *http.Response, pay
 	_ = cacheKey
 }
 
-func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayload, customHeaders map[string]string, completionID, model, query, statToken string, parallelToolCalls *bool, toolChoice string) (parsedMimoChat, string) {
+func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayload, customHeaders map[string]string, completionID, model, query, statToken string, parallelToolCalls *bool, toolChoice string, tools []models.Tool) (parsedMimoChat, string) {
 	currentResp := firstResp
 	currentPayload := payload
 	currentQuery := query
@@ -1091,7 +1094,8 @@ func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayloa
 		},
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	const maxAgentSemanticAttempts = 4
+	for attempt := 0; attempt < maxAgentSemanticAttempts; attempt++ {
 		parsed, err := parseMimoHTTPResponse(currentResp, completionID, model, currentQuery, parallelToolCalls, true)
 		if err != nil {
 			fmt.Printf("[%s] Failed to parse Xiaomi response: %v\n", completionID, err)
@@ -1099,7 +1103,14 @@ func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayloa
 		}
 		last = parsed
 
-		if !shouldRetryAgentToolCall(parsed, toolChoice) || attempt == 1 {
+		needsRetry := shouldRetryAgentToolCall(parsed, toolChoice)
+		if !needsRetry {
+			return parsed, statToken
+		}
+		if attempt == maxAgentSemanticAttempts-1 {
+			if synthesized := synthesizePathReadToolCalls(parsed, tools, parallelToolCalls); len(synthesized.ToolCalls) > 0 {
+				return synthesized, statToken
+			}
 			return parsed, statToken
 		}
 
@@ -1131,6 +1142,96 @@ func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayloa
 	return last, statToken
 }
 
+func synthesizePathReadToolCalls(result parsedMimoChat, tools []models.Tool, parallelToolCalls *bool) parsedMimoChat {
+	paths := extractPathOnlyResponse(result.CleanText)
+	if len(paths) == 0 {
+		return parsedMimoChat{}
+	}
+
+	toolName, argName := selectReadTool(tools)
+	if toolName == "" {
+		return parsedMimoChat{}
+	}
+
+	calls := make([]models.ToolCall, 0, len(paths))
+	for _, path := range paths {
+		args, _ := json.Marshal(map[string]string{argName: path})
+		calls = append(calls, models.ToolCall{
+			ID:   "call_" + utils.GenerateID(),
+			Type: "function",
+			Function: models.ToolFunction{
+				Name:      toolName,
+				Arguments: string(args),
+			},
+		})
+	}
+	calls = finalizeToolCalls(calls)
+
+	result.CleanText = ""
+	result.ToolCalls = calls
+	result.ResponseCalls = responseToolCalls(calls, parallelToolCalls, true)
+	result.FinishReason = "tool_calls"
+	return result
+}
+
+func extractPathOnlyResponse(text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" || agentLocationOnlyRegex.MatchString(text) {
+		return nil
+	}
+
+	matches := agentPathTokenRegex.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	remaining := agentPathTokenRegex.ReplaceAllString(text, "")
+	remaining = strings.TrimSpace(strings.Trim(remaining, ",;|`'\"()[]{}"))
+	if remaining != "" {
+		return nil
+	}
+	return matches
+}
+
+func selectReadTool(tools []models.Tool) (string, string) {
+	preferredNames := []string{"read", "read_file", "readFile", "open_file", "view_file"}
+	for _, preferred := range preferredNames {
+		for _, tool := range tools {
+			if tool.Type == "function" && tool.Function.Name == preferred {
+				return tool.Function.Name, selectPathArgumentName(tool)
+			}
+		}
+	}
+
+	for _, tool := range tools {
+		if tool.Type != "function" {
+			continue
+		}
+		name := strings.ToLower(tool.Function.Name)
+		if strings.Contains(name, "read") || strings.Contains(name, "open") || strings.Contains(name, "view") {
+			return tool.Function.Name, selectPathArgumentName(tool)
+		}
+	}
+	return "", ""
+}
+
+func selectPathArgumentName(tool models.Tool) string {
+	var schema map[string]interface{}
+	b, err := json.Marshal(tool.Function.Parameters)
+	if err == nil {
+		_ = json.Unmarshal(b, &schema)
+	}
+
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		for _, candidate := range []string{"filePath", "path", "absolutePath", "filename", "file"} {
+			if _, ok := props[candidate]; ok {
+				return candidate
+			}
+		}
+	}
+	return "filePath"
+}
+
 func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 	if len(result.ToolCalls) > 0 {
 		return false
@@ -1144,7 +1245,7 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 	}
 
 	rawClean := strings.TrimSpace(result.CleanText)
-	if agentLocationOnlyRegex.MatchString(rawClean) {
+	if agentLocationOnlyRegex.MatchString(rawClean) || len(extractPathOnlyResponse(rawClean)) > 0 {
 		return true
 	}
 

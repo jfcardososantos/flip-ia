@@ -15,6 +15,8 @@ type StoredAuth struct {
 	ServiceToken  string `json:"serviceToken,omitempty"`
 	UserID        string `json:"userId,omitempty"`
 	XiaomiChatbot string `json:"xiaomiChatbotPh,omitempty"`
+	DeepSeekCookie string `json:"deepseekCookie,omitempty"`
+	DeepSeekToken  string `json:"deepseekToken,omitempty"`
 }
 
 func authConfigPath() string {

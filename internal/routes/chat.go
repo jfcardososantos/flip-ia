@@ -40,6 +40,17 @@ var (
 	clientIdentityPromptRegex = regexp.MustCompile(`(?im)^\s*(you are|you're|you act as|you will act as)\s+(an?\s+)?(hermes(?:\s+agent)?|kilo(?:\s+code)?|cline|roo(?:\s+code)?|cursor(?:\s+agent)?|ide\s+agent)\b[^\n]*`)
 )
 
+type openAIChatInput struct {
+	Messages          []models.Message `json:"messages"`
+	Model             string           `json:"model"`
+	Stream            bool             `json:"stream"`
+	User              string           `json:"user"`
+	Tools             []models.Tool    `json:"tools"`
+	ToolChoice        interface{}      `json:"tool_choice"`
+	ParallelToolCalls *bool            `json:"parallel_tool_calls"`
+	WebSearch         bool             `json:"web_search"`
+}
+
 func AddResponseTime(t int64) {
 	StatsMutex.Lock()
 	defer StatsMutex.Unlock()
@@ -119,7 +130,7 @@ func RegisterChatRoutes(r *gin.Engine, authMiddleware gin.HandlerFunc) {
 func handleModels(c *gin.Context) {
 	auth, err := services.GetSelectedAuth()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid Xiaomi auth configuration", "details": err.Error()})
+		c.JSON(http.StatusOK, gin.H{"object": "list", "data": appendDeepSeekModels([]map[string]interface{}{})})
 		return
 	}
 
@@ -159,6 +170,7 @@ func handleModels(c *gin.Context) {
 					"description": m.EnIntro,
 				})
 			}
+			modelsList = appendDeepSeekModels(modelsList)
 			response := gin.H{"object": "list", "data": modelsList}
 			services.GlobalCache.Set("models_list", response, 30*time.Minute)
 			c.JSON(http.StatusOK, response)
@@ -166,9 +178,35 @@ func handleModels(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"object": "list", "data": []map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{"object": "list", "data": appendDeepSeekModels([]map[string]interface{}{
 		{"id": "mimo-v2.5-pro", "object": "model", "created": 1700000000, "owned_by": "xiaomi"},
-	}})
+	})})
+}
+
+func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]interface{} {
+	return append(modelsList,
+		map[string]interface{}{
+			"id":          "deepseek-chat",
+			"object":      "model",
+			"created":     1735689600,
+			"owned_by":    "deepseek",
+			"description": "DeepSeek web chat session",
+		},
+		map[string]interface{}{
+			"id":          "deepseek-reasoner",
+			"object":      "model",
+			"created":     1735689600,
+			"owned_by":    "deepseek",
+			"description": "DeepSeek web chat session with thinking enabled",
+		},
+		map[string]interface{}{
+			"id":          "deepseek-search",
+			"object":      "model",
+			"created":     1735689600,
+			"owned_by":    "deepseek",
+			"description": "DeepSeek web chat session with web search enabled",
+		},
+	)
 }
 
 func handleDirectProxy(c *gin.Context) {
@@ -416,16 +454,7 @@ func handleChatCompletions(c *gin.Context) {
 	cacheKey := fmt.Sprintf("req_%x", bodyCopy)
 	fmt.Printf("Incoming request size: %d bytes\n", len(bodyCopy))
 
-	var input struct {
-		Messages          []models.Message `json:"messages"`
-		Model             string           `json:"model"`
-		Stream            bool             `json:"stream"`
-		User              string           `json:"user"`
-		Tools             []models.Tool    `json:"tools"`
-		ToolChoice        interface{}      `json:"tool_choice"`
-		ParallelToolCalls *bool            `json:"parallel_tool_calls"`
-		WebSearch         bool             `json:"web_search"`
-	}
+	var input openAIChatInput
 
 	if err = json.Unmarshal(bodyCopy, &input); err != nil {
 		utils.SendError(c, http.StatusBadRequest, "Invalid request body", "invalid_request_error", nil)
@@ -442,6 +471,15 @@ func handleChatCompletions(c *gin.Context) {
 
 	if len(input.Messages) == 0 {
 		utils.SendError(c, http.StatusBadRequest, "Messages array is required and cannot be empty", "invalid_request_error", nil)
+		return
+	}
+
+	targetModel := strings.TrimSpace(input.Model)
+	if targetModel == "" {
+		targetModel = "mimo-v2.5-pro"
+	}
+	if services.IsDeepSeekModel(targetModel) {
+		handleDeepSeekChatCompletions(c, input, completionID, cacheKey, targetModel)
 		return
 	}
 
@@ -609,11 +647,6 @@ func handleChatCompletions(c *gin.Context) {
 	fmt.Printf("[%s] Query size: %d chars | agent=%v | messages=%d\n",
 		completionID, len(query), agentMode, len(input.Messages))
 
-	targetModel := strings.TrimSpace(input.Model)
-	if targetModel == "" {
-		targetModel = "mimo-v2.5-pro"
-	}
-
 	enableThinking := !strings.Contains(input.Model, "no-thinking")
 	if len(input.Tools) > 0 {
 		// Com tools, thinking longo costuma gerar só planejamento e finish_reason=stop no Kilo/agent.
@@ -744,6 +777,161 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, statToken, input.ParallelToolCalls, len(input.Tools) == 0, agentMode)
+}
+
+func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {
+	if len(input.Tools) > 0 {
+		utils.SendError(c, http.StatusBadRequest, "DeepSeek web provider does not support tools through this proxy yet", "invalid_request_error", nil)
+		return
+	}
+
+	auth, err := services.GetSelectedDeepSeekAuth()
+	if err != nil {
+		utils.SendError(c, http.StatusInternalServerError, "Invalid DeepSeek auth configuration: "+err.Error(), "server_error", nil)
+		return
+	}
+
+	customHeaders := make(map[string]string)
+	for k, v := range c.Request.Header {
+		customHeaders[strings.ToLower(k)] = v[0]
+	}
+
+	sessionHandle := strings.TrimSpace(input.User)
+	if sessionHandle == "" {
+		sessionHandle = services.GenerateFingerprint(input.Messages)
+	}
+
+	sessionID := ""
+	if sessionHandle != "" {
+		if cached, found := services.GlobalCache.Get("deepseek_session_" + sessionHandle); found {
+			if s, ok := cached.(string); ok {
+				sessionID = s
+			}
+		}
+	}
+	if sessionID == "" {
+		sessionID, err = services.CreateDeepSeekSession(auth, customHeaders)
+		if err != nil {
+			utils.SendError(c, http.StatusBadGateway, "Failed to create DeepSeek chat session: "+err.Error(), "server_error", nil)
+			return
+		}
+		if sessionHandle != "" {
+			services.GlobalCache.Set("deepseek_session_"+sessionHandle, sessionID, 55*time.Minute)
+		}
+	}
+
+	prompt := buildDeepSeekPrompt(input.Messages)
+	thinking := deepSeekThinkingEnabled(targetModel)
+	search := input.WebSearch || strings.Contains(strings.ToLower(targetModel), "search")
+
+	resp, err := services.SendDeepSeekChatRequest(auth, sessionID, prompt, thinking, search, customHeaders)
+	if err != nil {
+		if err == services.ErrDeepSeekPoWRequired {
+			utils.SendError(c, http.StatusNotImplemented, "DeepSeek Web accepted the session but requires a Proof-of-Work response for /api/v0/chat/completion. Cookie + userToken import is implemented; local PoW solving still needs to be added before this web provider can complete chats reliably.", "server_error", nil)
+			return
+		}
+		utils.SendError(c, http.StatusBadGateway, "Failed to call DeepSeek: "+err.Error(), "server_error", nil)
+		return
+	}
+	if resp == nil {
+		utils.SendError(c, http.StatusBadGateway, "DeepSeek returned no response", "server_error", nil)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyReader, closeBody := services.ReadDeepSeekBody(resp)
+		body, _ := io.ReadAll(bodyReader)
+		closeBody()
+		c.JSON(resp.StatusCode, gin.H{"error": "DeepSeek API error", "status": resp.StatusCode, "details": string(body)})
+		return
+	}
+
+	bodyReader, closeBody := services.ReadDeepSeekBody(resp)
+	result := services.ParseDeepSeekStream(bodyReader)
+	closeBody()
+	result.Usage.PromptTokens = len(prompt) / 4
+	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
+
+	if sessionHandle != "" {
+		services.SaveMessage(sessionHandle, "asst_"+completionID, "assistant", assistantTranscript(result.Content, result.ReasoningText))
+	}
+
+	if input.Stream {
+		writeDeepSeekStreamResponse(c, completionID, targetModel, result)
+		return
+	}
+
+	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result)
+	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
+	c.JSON(http.StatusOK, response)
+}
+
+func buildDeepSeekPrompt(messages []models.Message) string {
+	if len(messages) == 1 {
+		return utils.FormatMessageForMiMo(messages[0])
+	}
+
+	turns := make([]string, 0, len(messages))
+	for _, message := range messages {
+		formatted := formatConversationTurn(message)
+		if strings.TrimSpace(formatted) != "" {
+			turns = append(turns, formatted)
+		}
+	}
+	return strings.Join(turns, "\n\n")
+}
+
+func deepSeekThinkingEnabled(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(model, "no-thinking") || strings.Contains(model, "v3") || model == "deepseek-chat" {
+		return false
+	}
+	return strings.Contains(model, "reason") || strings.Contains(model, "r1") || strings.Contains(model, "think")
+}
+
+func writeDeepSeekStreamResponse(c *gin.Context, completionID string, model string, result models.DeepSeekChatResult) {
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	initialChunk := models.ChatCompletionChunk{
+		ID:      "chatcmpl-" + completionID,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []models.Choice{{
+			Index: 0,
+			Delta: models.Delta{Role: "assistant"},
+		}},
+	}
+	utils.WriteSSEChunk(c, initialChunk)
+	if result.ReasoningText != "" {
+		utils.WriteSSEChunk(c, utils.CreateChatCompletionChunk(completionID, "", model, nil, result.ReasoningText, nil, nil))
+	}
+	if result.Content != "" {
+		utils.WriteSSEChunk(c, utils.CreateChatCompletionChunk(completionID, result.Content, model, nil, "", nil, nil))
+	}
+	utils.FinalizeChatStream(c, completionID, model, "stop", &result.Usage)
+}
+
+func buildDeepSeekNonStreamResponse(completionID string, model string, result models.DeepSeekChatResult) gin.H {
+	return gin.H{
+		"id":      "chatcmpl-" + completionID,
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []gin.H{{
+			"index": 0,
+			"message": models.Delta{
+				Role:             "assistant",
+				Content:          result.Content,
+				ReasoningContent: result.ReasoningText,
+			},
+			"finish_reason": "stop",
+		}},
+		"usage": result.Usage,
+	}
 }
 
 func assistantTranscript(content, reasoning string) string {

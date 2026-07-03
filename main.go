@@ -85,6 +85,19 @@ func buildStoredAuth(rawCookie string, token string, userID string, ph string) s
 	}
 }
 
+func mergeXiaomiAuth(existing services.StoredAuth, rawCookie string, token string, userID string, ph string) services.StoredAuth {
+	stored := buildStoredAuth(rawCookie, token, userID, ph)
+	stored.DeepSeekCookie = existing.DeepSeekCookie
+	stored.DeepSeekToken = existing.DeepSeekToken
+	return stored
+}
+
+func mergeDeepSeekAuth(existing services.StoredAuth, rawCookie string, token string) services.StoredAuth {
+	existing.DeepSeekCookie = strings.TrimSpace(rawCookie)
+	existing.DeepSeekToken = strings.TrimSpace(token)
+	return existing
+}
+
 func zipDirectory(root string) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -130,7 +143,9 @@ func hasStoredAuth(stored services.StoredAuth, storedErr error) bool {
 		(strings.TrimSpace(stored.XiaomiCookie) != "" ||
 			strings.TrimSpace(stored.ServiceToken) != "" ||
 			strings.TrimSpace(stored.UserID) != "" ||
-			strings.TrimSpace(stored.XiaomiChatbot) != "")
+			strings.TrimSpace(stored.XiaomiChatbot) != "" ||
+			strings.TrimSpace(stored.DeepSeekCookie) != "" ||
+			strings.TrimSpace(stored.DeepSeekToken) != "")
 }
 
 func detectAuthSource(stored services.StoredAuth, storedErr error) string {
@@ -308,6 +323,9 @@ func main() {
 			"storedHasToken":   stored.ServiceToken != "",
 			"storedHasUserID":  stored.UserID != "",
 			"storedHasChatbot": stored.XiaomiChatbot != "",
+			"deepseekConfigured": stored.DeepSeekCookie != "" && stored.DeepSeekToken != "",
+			"storedHasDeepSeekCookie": stored.DeepSeekCookie != "",
+			"storedHasDeepSeekToken":  stored.DeepSeekToken != "",
 			"selectedPh":       auth.Ph,
 		})
 	})
@@ -341,6 +359,8 @@ func main() {
 				"SERVICE_TOKEN":     maskValue(stored.ServiceToken),
 				"USER_ID":           maskValue(stored.UserID),
 				"XIAOMI_CHATBOT_PH": maskValue(stored.XiaomiChatbot),
+				"DEEPSEEK_COOKIE":   maskValue(stored.DeepSeekCookie),
+				"DEEPSEEK_TOKEN":    maskValue(stored.DeepSeekToken),
 			},
 			"selectedAuth": gin.H{
 				"token": maskValue(auth.Token),
@@ -374,7 +394,8 @@ func main() {
 			return
 		}
 
-		stored := buildStoredAuth(payload.RawCookie, auth.Token, auth.UserID, auth.Ph)
+		existing, _ := services.LoadStoredAuth()
+		stored := mergeXiaomiAuth(existing, payload.RawCookie, auth.Token, auth.UserID, auth.Ph)
 		if err := services.SaveStoredAuth(stored); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist extension session", "details": err.Error()})
 			return
@@ -421,7 +442,8 @@ func main() {
 			return
 		}
 
-		stored := buildStoredAuth(payload.XiaomiCookie, payload.ServiceToken, payload.UserID, payload.XiaomiChatbot)
+		existing, _ := services.LoadStoredAuth()
+		stored := mergeXiaomiAuth(existing, payload.XiaomiCookie, payload.ServiceToken, payload.UserID, payload.XiaomiChatbot)
 		if err := services.SaveStoredAuth(stored); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist credentials", "details": err.Error()})
 			return
@@ -431,6 +453,88 @@ func main() {
 			"saved":      true,
 			"authSource": "data/auth.json",
 			"selectedPh": auth.Ph,
+			"storePath":  services.AuthStorePathForDisplay(),
+		})
+	})
+
+	r.POST("/auth/deepseek/extension/import", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+
+		var payload struct {
+			UserToken string `json:"userToken"`
+			RawCookie string `json:"rawCookie"`
+			Source    string `json:"source"`
+		}
+
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid DeepSeek extension payload", "details": err.Error()})
+			return
+		}
+
+		auth, err := services.ValidateDeepSeekAuthInput(payload.RawCookie, payload.UserToken)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid DeepSeek session from extension", "details": err.Error()})
+			return
+		}
+
+		existing, _ := services.LoadStoredAuth()
+		stored := mergeDeepSeekAuth(existing, auth.Cookie, auth.Token)
+		if err := services.SaveStoredAuth(stored); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist DeepSeek session", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"saved":         true,
+			"authSource":    "data/auth.json",
+			"storePath":     services.AuthStorePathForDisplay(),
+			"importedFrom":  payload.Source,
+			"cookiePresent": strings.TrimSpace(auth.Cookie) != "",
+			"tokenPresent":  strings.TrimSpace(auth.Token) != "",
+		})
+	})
+
+	r.POST("/auth/deepseek/import", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+
+		var payload struct {
+			DeepSeekCookie string `json:"deepseek_cookie" form:"deepseek_cookie"`
+			DeepSeekToken  string `json:"deepseek_token" form:"deepseek_token"`
+		}
+
+		if strings.Contains(c.GetHeader("Content-Type"), "application/json") {
+			body, _ := io.ReadAll(c.Request.Body)
+			if len(strings.TrimSpace(string(body))) > 0 {
+				if err := json.Unmarshal(body, &payload); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON payload", "details": err.Error()})
+					return
+				}
+			}
+		} else if err := c.ShouldBind(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid form payload", "details": err.Error()})
+			return
+		}
+
+		auth, err := services.ValidateDeepSeekAuthInput(payload.DeepSeekCookie, payload.DeepSeekToken)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid DeepSeek credentials", "details": err.Error()})
+			return
+		}
+
+		existing, _ := services.LoadStoredAuth()
+		stored := mergeDeepSeekAuth(existing, auth.Cookie, auth.Token)
+		if err := services.SaveStoredAuth(stored); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist DeepSeek credentials", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"saved":      true,
+			"authSource": "data/auth.json",
 			"storePath":  services.AuthStorePathForDisplay(),
 		})
 	})

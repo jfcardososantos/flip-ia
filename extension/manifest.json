@@ -5,12 +5,16 @@
   "description": "Captura a sessão autenticada da Xiaomi AI Studio e envia ao flip-mimo-api.",
   "permissions": [
     "cookies",
-    "storage"
+    "storage",
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://aistudio.xiaomimimo.com/*",
     "https://*.xiaomimimo.com/*",
     "https://account.xiaomi.com/*",
+    "https://chat.deepseek.com/*",
+    "https://*.deepseek.com/*",
     "https://*/*",
     "http://*/*"
   ],

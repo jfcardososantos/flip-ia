@@ -75,7 +75,7 @@
   </head>
   <body>
     <h1>flip-mimo-api Importer</h1>
-    <p class="hint">Abra o Xiaomi AI Studio logado neste navegador. Depois informe a URL do proxy e importe a sessão.</p>
+    <p class="hint">Abra o provedor logado neste navegador. Depois informe a URL do proxy e importe a sessão desejada.</p>
 
     <label for="proxyUrl">Proxy URL</label>
     <input id="proxyUrl" type="url" placeholder="https://seu-proxy.exemplo.com">
@@ -85,7 +85,12 @@
 
     <div class="row">
       <button id="openXiaomi" type="button" class="secondary">Open Xiaomi</button>
+      <button id="openDeepSeek" type="button" class="secondary">Open DeepSeek</button>
+    </div>
+
+    <div class="row">
       <button id="saveConfig" type="button" class="secondary">Save Config</button>
+      <button id="importDeepSeekSession" type="button">Import DeepSeek</button>
     </div>
 
     <button id="importSession" type="button">Import Xiaomi Session</button>

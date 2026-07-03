@@ -30,8 +30,8 @@ ARG API_KEY
 ARG CORS_ORIGIN
 ARG PORT=3000
 
-# Install CA certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates tzdata
+# Install CA certificates for HTTPS requests and Node for DeepSeek PoW WASM solving
+RUN apk --no-cache add ca-certificates tzdata nodejs
 
 WORKDIR /app
 
@@ -51,6 +51,8 @@ COPY --from=builder /app/flip-ai .
 COPY --from=builder /app/templates ./templates
 # Copy browser extension assets for download packaging
 COPY --from=builder /app/extension ./extension
+# Copy runtime assets used by provider adapters
+COPY --from=builder /app/internal/assets ./internal/assets
 
 EXPOSE 3000
 

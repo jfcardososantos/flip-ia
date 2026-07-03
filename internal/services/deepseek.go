@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 const deepSeekBaseURL = "https://chat.deepseek.com"
@@ -123,12 +122,6 @@ func CreateDeepSeekSession(auth models.DeepSeekAuth, customHeaders map[string]st
 }
 
 func SendDeepSeekChatRequest(auth models.DeepSeekAuth, sessionID string, prompt string, thinking bool, search bool, customHeaders map[string]string) (*http.Response, error) {
-	if strings.TrimSpace(os.Getenv("DEEPSEEK_POW_RESPONSE")) == "" {
-		if required, err := deepSeekPoWRequired(auth, customHeaders); err == nil && required {
-			return nil, ErrDeepSeekPoWRequired
-		}
-	}
-
 	payload := map[string]interface{}{
 		"chat_session_id":   sessionID,
 		"parent_message_id": nil,
@@ -139,7 +132,15 @@ func SendDeepSeekChatRequest(auth models.DeepSeekAuth, sessionID string, prompt 
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", deepSeekBaseURL+"/api/v0/chat/completion", bytes.NewBuffer(payloadBytes))
-	for k, v := range DeepSeekHeaders(auth, customHeaders) {
+	headers := DeepSeekHeaders(auth, customHeaders)
+	if strings.TrimSpace(os.Getenv("DEEPSEEK_POW_RESPONSE")) == "" {
+		powResponse, err := GetDeepSeekPoWResponse(auth, customHeaders)
+		if err != nil {
+			return nil, err
+		}
+		headers["x-ds-pow-response"] = powResponse
+	}
+	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 
@@ -214,43 +215,6 @@ func parseDeepSeekData(dataStr string, result *models.DeepSeekChatResult) {
 		}
 		result.Content += text
 	}
-}
-
-func deepSeekPoWRequired(auth models.DeepSeekAuth, customHeaders map[string]string) (bool, error) {
-	payloadBytes, _ := json.Marshal(map[string]string{"target_path": "/api/v0/chat/completion"})
-	req, _ := http.NewRequest("POST", deepSeekBaseURL+"/api/v0/chat/create_pow_challenge", bytes.NewBuffer(payloadBytes))
-	for k, v := range DeepSeekHeaders(auth, customHeaders) {
-		req.Header.Set(k, v)
-	}
-
-	client := *GlobalHTTPClient
-	client.Timeout = 20 * time.Second
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	body, err := readMaybeGzip(resp)
-	if err != nil {
-		return false, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return false, nil
-	}
-
-	var result struct {
-		Code int `json:"code"`
-		Data struct {
-			BizData struct {
-				Challenge interface{} `json:"challenge"`
-			} `json:"biz_data"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return false, nil
-	}
-	return result.Code == 0 && result.Data.BizData.Challenge != nil, nil
 }
 
 func readMaybeGzip(resp *http.Response) ([]byte, error) {

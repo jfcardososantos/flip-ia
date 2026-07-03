@@ -40,6 +40,7 @@ Se a Xiaomi invalidar a sessão:
 ## Requisitos
 
 - Go 1.24+ para execução local
+- Node.js para o solver de Proof-of-Work do DeepSeek Web em execução local
 - Docker e Docker Compose para execução em container
 - Chrome ou Edge para usar a extensão
 

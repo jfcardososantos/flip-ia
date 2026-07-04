@@ -121,3 +121,27 @@ func TestSynthesizeReadCommandToolCalls(t *testing.T) {
 		t.Fatalf("unexpected second arguments: %s", out.ToolCalls[1].Function.Arguments)
 	}
 }
+
+func TestShouldRetryAgentToolCallForPortugueseActionIntent(t *testing.T) {
+	result := parsedMimoChat{
+		CleanText: `Além disso, notei que o prompt positivo no workflow está vazio.
+Vou verificar se o script está realmente substituindo o texto do prompt antes de enviar.
+Vou reexecutar com o timeout estendido e monitorar o log do ComfyUI.`,
+		FinishReason: "stop",
+	}
+
+	if !shouldRetryAgentToolCall(result, "auto") {
+		t.Fatalf("expected retry for action-intent-only response")
+	}
+}
+
+func TestShouldNotRetryAgentToolCallForCompletedPortugueseResponse(t *testing.T) {
+	result := parsedMimoChat{
+		CleanText:    "Concluí a verificação, ajustei o workflow e corrigi o prompt positivo vazio no generate.py.",
+		FinishReason: "stop",
+	}
+
+	if shouldRetryAgentToolCall(result, "auto") {
+		t.Fatalf("expected no retry for completed response")
+	}
+}

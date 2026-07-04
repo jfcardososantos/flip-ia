@@ -1653,12 +1653,60 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 		return true
 	}
 
+	return looksLikeActionIntentOnlyResponse(clean)
+}
+
+func looksLikeActionIntentOnlyResponse(clean string) bool {
+	if clean == "" {
+		return false
+	}
+
+	completionMarkers := []string{
+		"concluí",
+		"concluido",
+		"concluído",
+		"finalizei",
+		"terminei",
+		"pronto",
+		"feito",
+		"resolvido",
+		"corrigi",
+		"ajustei",
+		"editei",
+		"atualizei",
+		"implementei",
+		"alterei",
+		"adicionei",
+		"removi",
+		"i've",
+		"i have",
+		"done",
+		"fixed",
+		"updated",
+		"implemented",
+		"changed",
+		"completed",
+		"finished",
+	}
+	for _, marker := range completionMarkers {
+		if strings.Contains(clean, marker) {
+			return false
+		}
+	}
+
 	actionOnlyMarkers := []string{
 		"let me start",
 		"i'll start",
 		"i will start",
+		"i'll check",
+		"i will check",
+		"i'll inspect",
+		"i will inspect",
 		"i need to inspect",
 		"i need to read",
+		"i need to check",
+		"while i wait",
+		"in the meantime",
 		"vou começar",
 		"vou iniciar",
 		"vou construir",
@@ -1668,12 +1716,34 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 		"vou ajustar",
 		"vou corrigir",
 		"vou verificar",
+		"vou checar",
+		"vou conferir",
+		"vou analisar",
+		"vou investigar",
+		"vou revisar",
+		"vou inspecionar",
+		"vou validar",
+		"vou testar",
+		"vou reexecutar",
+		"vou rerodar",
+		"vou rodar novamente",
+		"vou monitorar",
+		"vou acompanhar",
 		"vou ler",
 		"vou abrir",
 		"vou editar",
-		"vamos começar",
+		"vou atualizar",
+		"vou tentar",
+		"vou aguardar",
+		"enquanto aguardo",
+		"enquanto isso",
+		"além disso, notei",
 		"preciso verificar",
 		"preciso ler",
+		"preciso checar",
+		"preciso revisar",
+		"preciso inspecionar",
+		"vamos começar",
 		"começar constru",
 	}
 	for _, marker := range actionOnlyMarkers {

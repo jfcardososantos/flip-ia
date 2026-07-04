@@ -137,7 +137,7 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 		}
 	}
 
-	selfClosingToolCallRegex := regexp.MustCompile(`(?s)<tool_call\s+([^<>]*?)\s*/>`)
+	selfClosingToolCallRegex := regexp.MustCompile(`(?s)<tool_call\s+([^<>]*?)\s*(?:/>|>\s*</tool_call>)`)
 	selfClosingMatches := selfClosingToolCallRegex.FindAllStringSubmatch(text, -1)
 	for _, match := range selfClosingMatches {
 		if len(match) < 2 {

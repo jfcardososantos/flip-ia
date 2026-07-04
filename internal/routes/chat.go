@@ -874,6 +874,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
 	if len(toolCalls) > 0 {
 		result.Content = ""
+		result.ReasoningText = ""
 		storePendingToolCalls(sessionHandle, toolCalls)
 	}
 

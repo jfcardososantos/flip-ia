@@ -88,6 +88,20 @@ func TestParseToolCallsMultipleSelfClosingXML(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsAttributeXMLWithClosingTag(t *testing.T) {
+	text := `<tool_call name="terminal" command="echo ok" timeout="10"></tool_call>`
+	clean, calls := ParseToolCalls(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Fatalf("unexpected name: %s", calls[0].Function.Name)
+	}
+	if strings.Contains(clean, "tool_call") {
+		t.Fatalf("expected clean text without tool markup, got %q", clean)
+	}
+}
+
 func TestParseToolCallsTrailingJSON(t *testing.T) {
 	text := "Resposta aqui.\n```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/a\"}}\n```"
 	_, calls := ParseToolCalls(text)

@@ -30,6 +30,7 @@ func FormatToolsAsInstructions(tools []models.Tool) string {
 	var sb strings.Builder
 	sb.WriteString("\n\n# Tools\n\nYou have access to the following tools. To call a tool, you MUST use exactly this XML format and no Markdown fence:\n")
 	sb.WriteString("<tool_call>{\"name\":\"function_name\",\"arguments\":{\"arg1\":\"value1\"}}</tool_call>\n\n")
+	sb.WriteString("Do not use XML attributes such as <tool_call name=\"function_name\"/>. Put the JSON object inside the tag.\n\n")
 	sb.WriteString("Available tools:\n")
 
 	for _, tool := range tools {
@@ -131,6 +132,18 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 			toolCalls = append(toolCalls, parsed...)
 			cleanText = strings.Replace(cleanText, match[0], "", 1)
 		} else if parsed := parseHermesToolCallXML(jsonStr); len(parsed) > 0 {
+			toolCalls = append(toolCalls, parsed...)
+			cleanText = strings.Replace(cleanText, match[0], "", 1)
+		}
+	}
+
+	selfClosingToolCallRegex := regexp.MustCompile(`(?s)<tool_call\s+([^<>]*?)\s*/>`)
+	selfClosingMatches := selfClosingToolCallRegex.FindAllStringSubmatch(text, -1)
+	for _, match := range selfClosingMatches {
+		if len(match) < 2 {
+			continue
+		}
+		if parsed := parseSelfClosingToolCallXML(match[1]); len(parsed) > 0 {
 			toolCalls = append(toolCalls, parsed...)
 			cleanText = strings.Replace(cleanText, match[0], "", 1)
 		}
@@ -256,6 +269,109 @@ func parseHermesToolCallXML(raw string) []models.ToolCall {
 	}
 
 	return calls
+}
+
+func parseSelfClosingToolCallXML(raw string) []models.ToolCall {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	name := xmlAttrValue(raw, "name")
+	if name == "" {
+		return nil
+	}
+
+	argsStr := "{}"
+	if arguments := xmlAttrValueGreedy(raw, "arguments"); strings.TrimSpace(arguments) != "" {
+		argsStr = strings.TrimSpace(html.UnescapeString(arguments))
+	} else {
+		args := parseXMLAttrs(raw)
+		delete(args, "name")
+		if len(args) > 0 {
+			b, err := json.Marshal(args)
+			if err == nil {
+				argsStr = string(b)
+			}
+		}
+	}
+
+	return []models.ToolCall{{
+		ID:   "call_" + GenerateID(),
+		Type: "function",
+		Function: models.ToolFunction{
+			Name:      name,
+			Arguments: argsStr,
+		},
+	}}
+}
+
+func xmlAttrValue(raw string, key string) string {
+	attrs := parseXMLAttrs(raw)
+	return attrs[key]
+}
+
+func xmlAttrValueGreedy(raw string, key string) string {
+	prefix := key + `="`
+	start := strings.Index(raw, prefix)
+	if start == -1 {
+		return ""
+	}
+	start += len(prefix)
+	end := strings.LastIndex(raw[start:], `"`)
+	if end == -1 {
+		return ""
+	}
+	return raw[start : start+end]
+}
+
+func parseXMLAttrs(raw string) map[string]string {
+	attrs := map[string]string{}
+	i := 0
+	for i < len(raw) {
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\t' || raw[i] == '\r') {
+			i++
+		}
+		keyStart := i
+		for i < len(raw) && (raw[i] == '_' || raw[i] == '-' || raw[i] == ':' || raw[i] == '.' || raw[i] >= 'A' && raw[i] <= 'Z' || raw[i] >= 'a' && raw[i] <= 'z' || raw[i] >= '0' && raw[i] <= '9') {
+			i++
+		}
+		if keyStart == i {
+			i++
+			continue
+		}
+		key := raw[keyStart:i]
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\t' || raw[i] == '\r') {
+			i++
+		}
+		if i >= len(raw) || raw[i] != '=' {
+			continue
+		}
+		i++
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\t' || raw[i] == '\r') {
+			i++
+		}
+		if i >= len(raw) || raw[i] != '"' {
+			continue
+		}
+		i++
+		var value strings.Builder
+		for i < len(raw) {
+			if raw[i] == '\\' && i+1 < len(raw) {
+				value.WriteByte(raw[i+1])
+				i += 2
+				continue
+			}
+			if raw[i] == '"' {
+				i++
+				break
+			}
+			value.WriteByte(raw[i])
+			i++
+		}
+		attrs[key] = strings.TrimSpace(html.UnescapeString(value.String()))
+	}
+	return attrs
 }
 
 func stripMarkdownFence(s string) string {

@@ -869,11 +869,11 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	result.Usage.PromptTokens = len(prompt) / 4
 	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
 
-	cleanText, toolCalls := utils.ParseToolCalls(result.Content)
+	_, toolCalls := utils.ParseToolCalls(result.Content)
 	toolCalls = finalizeToolCalls(toolCalls)
 	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
 	if len(toolCalls) > 0 {
-		result.Content = cleanText
+		result.Content = ""
 		storePendingToolCalls(sessionHandle, toolCalls)
 	}
 

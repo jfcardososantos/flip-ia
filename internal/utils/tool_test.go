@@ -45,6 +45,49 @@ func TestParseToolCallsHermesFunctionXML(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsSelfClosingXMLArguments(t *testing.T) {
+	text := `Vou listar.
+<tool_call name="cronjob" arguments="{"action":"list"}"/>`
+	clean, calls := ParseToolCalls(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "cronjob" {
+		t.Fatalf("unexpected name: %s", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, `"action":"list"`) {
+		t.Fatalf("unexpected arguments: %s", calls[0].Function.Arguments)
+	}
+	if strings.Contains(clean, "tool_call") {
+		t.Fatalf("expected clean text without self-closing tool markup, got %q", clean)
+	}
+}
+
+func TestParseToolCallsSelfClosingXMLAttributes(t *testing.T) {
+	text := `<tool_call name="terminal" command="curl -s http://localhost:8188/object_info | grep -i sdxl" timeout="10"/>`
+	_, calls := ParseToolCalls(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Fatalf("unexpected name: %s", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, `"command"`) || !strings.Contains(calls[0].Function.Arguments, `"timeout":"10"`) {
+		t.Fatalf("unexpected arguments: %s", calls[0].Function.Arguments)
+	}
+}
+
+func TestParseToolCallsMultipleSelfClosingXML(t *testing.T) {
+	text := `<tool_call name="cronjob" arguments="{"action":"list"}"/> | <tool_call name="terminal" command="echo ok" timeout="10"/>`
+	clean, calls := ParseToolCalls(text)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	}
+	if strings.Contains(clean, "tool_call") {
+		t.Fatalf("expected clean text without tool markup, got %q", clean)
+	}
+}
+
 func TestParseToolCallsTrailingJSON(t *testing.T) {
 	text := "Resposta aqui.\n```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/a\"}}\n```"
 	_, calls := ParseToolCalls(text)

@@ -128,7 +128,7 @@ func FormatToolsAsInstructionsCompact(tools []models.Tool, toolChoice string) st
 	}
 	var sb strings.Builder
 	sb.WriteString("\n# Tools — call with <tool_call>{\"name\":\"fn\",\"arguments\":{...}}</tool_call>\n")
-	sb.WriteString("Use only valid JSON inside <tool_call>. Do not wrap tool calls in Markdown fences.\n")
+	sb.WriteString("Use only valid JSON inside <tool_call>. Do not use XML attributes like <tool_call name=\"...\"/>. Do not wrap tool calls in Markdown fences.\n")
 	for _, tool := range tools {
 		if tool.Type != "function" {
 			continue

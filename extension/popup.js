@@ -267,12 +267,17 @@ async function importDeepSeekSession() {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    const response = await fetch(`${proxyUrl}/auth/deepseek/extension/import`, {
+    const response = await fetch(`${proxyUrl}/auth/web/import`, {
       method: "POST",
       headers,
       body: JSON.stringify({
-        userToken,
+        provider: "deepseek",
+        token: userToken,
         rawCookie,
+        user_agent: navigator.userAgent,
+        storage: {
+          userToken
+        },
         source: "chrome-extension"
       })
     });

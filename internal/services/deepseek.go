@@ -44,17 +44,36 @@ func ValidateDeepSeekAuthInput(rawCookie string, token string) (models.DeepSeekA
 }
 
 func GetSelectedDeepSeekAuth() (models.DeepSeekAuth, error) {
-	stored, err := LoadStoredAuth()
-	if err != nil {
-		return models.DeepSeekAuth{}, err
-	}
-	if strings.TrimSpace(stored.DeepSeekCookie) == "" && strings.TrimSpace(stored.DeepSeekToken) == "" {
-		return models.DeepSeekAuth{}, errors.New("DeepSeek session not configured. Import a session with the Chrome extension or POST /auth/deepseek/import")
-	}
-	return ValidateDeepSeekAuthInput(stored.DeepSeekCookie, stored.DeepSeekToken)
+	_, auth, err := GetSelectedDeepSeekSession()
+	return auth, err
 }
 
-func DeepSeekHeaders(auth models.DeepSeekAuth, customHeaders map[string]string) map[string]string {
+func GetSelectedDeepSeekSession() (StoredWebSession, models.DeepSeekAuth, error) {
+	session, err := GetStoredWebSession("deepseek")
+	if err != nil {
+		return StoredWebSession{}, models.DeepSeekAuth{}, err
+	}
+	auth, err := ValidateDeepSeekAuthInput(session.Cookie, WebSessionToken(session))
+	if err != nil {
+		return StoredWebSession{}, models.DeepSeekAuth{}, err
+	}
+	return session, auth, nil
+}
+
+func DeepSeekHeaders(auth models.DeepSeekAuth, session StoredWebSession, customHeaders map[string]string) map[string]string {
+	userAgent := "DeepSeek/1.0.13 Android/35"
+	if strings.TrimSpace(session.UserAgent) != "" {
+		userAgent = strings.TrimSpace(session.UserAgent)
+	}
+	origin := deepSeekBaseURL
+	if strings.TrimSpace(session.Origin) != "" {
+		origin = strings.TrimSpace(session.Origin)
+	}
+	referer := deepSeekBaseURL + "/"
+	if strings.TrimSpace(session.Referer) != "" {
+		referer = strings.TrimSpace(session.Referer)
+	}
+
 	headers := map[string]string{
 		"accept":          "application/json",
 		"accept-encoding": "gzip",
@@ -62,12 +81,15 @@ func DeepSeekHeaders(auth models.DeepSeekAuth, customHeaders map[string]string) 
 		"content-type":    "application/json",
 		"cookie":          auth.Cookie,
 		"host":            "chat.deepseek.com",
-		"origin":          deepSeekBaseURL,
-		"referer":         deepSeekBaseURL + "/",
-		"user-agent":      "DeepSeek/1.0.13 Android/35",
+		"origin":          origin,
+		"referer":         referer,
+		"user-agent":      userAgent,
 	}
 
-	for _, key := range []string{"accept-language", "user-agent"} {
+	for key, value := range session.Headers {
+		headers[strings.ToLower(strings.TrimSpace(key))] = value
+	}
+	for _, key := range []string{"accept-language", "user-agent", "origin", "referer"} {
 		if val, ok := customHeaders[key]; ok && strings.TrimSpace(val) != "" {
 			headers[key] = val
 		}
@@ -79,10 +101,10 @@ func DeepSeekHeaders(auth models.DeepSeekAuth, customHeaders map[string]string) 
 	return headers
 }
 
-func CreateDeepSeekSession(auth models.DeepSeekAuth, customHeaders map[string]string) (string, error) {
+func CreateDeepSeekSession(auth models.DeepSeekAuth, session StoredWebSession, customHeaders map[string]string) (string, error) {
 	payloadBytes, _ := json.Marshal(map[string]string{"agent": "chat"})
 	req, _ := http.NewRequest("POST", deepSeekBaseURL+"/api/v0/chat_session/create", bytes.NewBuffer(payloadBytes))
-	for k, v := range DeepSeekHeaders(auth, customHeaders) {
+	for k, v := range DeepSeekHeaders(auth, session, customHeaders) {
 		req.Header.Set(k, v)
 	}
 
@@ -121,7 +143,7 @@ func CreateDeepSeekSession(auth models.DeepSeekAuth, customHeaders map[string]st
 	return result.Data.BizData.ID, nil
 }
 
-func SendDeepSeekChatRequest(auth models.DeepSeekAuth, sessionID string, prompt string, thinking bool, search bool, customHeaders map[string]string) (*http.Response, error) {
+func SendDeepSeekChatRequest(auth models.DeepSeekAuth, session StoredWebSession, sessionID string, prompt string, thinking bool, search bool, customHeaders map[string]string) (*http.Response, error) {
 	payload := map[string]interface{}{
 		"chat_session_id":   sessionID,
 		"parent_message_id": nil,
@@ -132,9 +154,9 @@ func SendDeepSeekChatRequest(auth models.DeepSeekAuth, sessionID string, prompt 
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", deepSeekBaseURL+"/api/v0/chat/completion", bytes.NewBuffer(payloadBytes))
-	headers := DeepSeekHeaders(auth, customHeaders)
+	headers := DeepSeekHeaders(auth, session, customHeaders)
 	if strings.TrimSpace(os.Getenv("DEEPSEEK_POW_RESPONSE")) == "" {
-		powResponse, err := GetDeepSeekPoWResponse(auth, customHeaders)
+		powResponse, err := GetDeepSeekPoWResponse(auth, session, customHeaders)
 		if err != nil {
 			return nil, err
 		}

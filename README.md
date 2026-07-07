@@ -31,6 +31,8 @@ A sessão ativa é lida de:
 
 Esse arquivo é preenchido pela extensão ou, se você quiser automatizar isso sem navegador, pelo endpoint administrativo `POST /auth/import`.
 
+Sessões web por provedor também podem ser persistidas nesse mesmo arquivo via `POST /auth/web/import`.
+
 Se a Xiaomi invalidar a sessão:
 
 1. `GET /auth/status` passa a indicar problema;
@@ -175,6 +177,8 @@ A home em `/` e `/dashboard` foi desenhada para operação rápida e não exibe 
 
 As configurações ficam em `/settings` e exigem `SETTINGS_PASSWORD` no ambiente. Nessa tela ficam o modelo default, a API key das requests, os formulários de Xiaomi, DeepSeek, Gemini, Groq, OpenRouter, Cloudflare e limpeza do arquivo local de credenciais.
 
+A tela também expõe um formulário genérico de sessão web para guardar `cookie`, `token`, `headers`, `storage`, `origin`, `referer` e `user-agent` por provedor, preparando adapters no padrão browser-session proxy.
+
 ## Endpoints
 
 ### OpenAI
@@ -262,6 +266,26 @@ Permite importar a sessão manualmente por payload, se você realmente precisar 
 
 Endpoint usado pela extensão.
 
+#### `POST /auth/web/import`
+
+Importa uma sessão web genérica por provedor. Payload típico:
+
+```json
+{
+  "provider": "deepseek",
+  "raw_cookie": "foo=bar; baz=qux",
+  "token": "token-opcional",
+  "user_agent": "Mozilla/5.0 ...",
+  "origin": "https://chat.deepseek.com",
+  "referer": "https://chat.deepseek.com/",
+  "headers": {"x-csrf-token": "..."},
+  "storage": {"userToken": "..."},
+  "source": "chrome-extension"
+}
+```
+
+Hoje o adapter web implementado é o `deepseek`. Os outros provedores podem ter a sessão armazenada desde já, mesmo antes do adapter HTTP correspondente existir.
+
 ## Integração com IDEs e clientes
 
 ### OpenAI-compatible
@@ -282,11 +306,14 @@ Configure o cliente para usar:
 
 O projeto converte ferramentas do formato OpenAI para o formato esperado pelo Mimo e devolve `tool_calls` compatíveis.
 
+Para DeepSeek, o proxy usa sessão web do navegador.
+
 Recomendações:
 
 - mantenha o `model` explícito
 - envie `stream: true` apenas quando quiser resposta em streaming
 - use `parallel_tool_calls: false` se o cliente tiver dificuldade com múltiplas tools por turno
+- para coding/agentes com DeepSeek web, mantenha prompts/tool instructions curtos e `parallel_tool_calls: false` quando o cliente não lida bem com múltiplas tools
 
 ## Persistência
 

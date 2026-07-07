@@ -137,6 +137,21 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 		}
 	}
 
+	attributedToolCallRegex := regexp.MustCompile(`(?s)<tool_call\s+([^<>]*?)>(.*?)</tool_call>`)
+	attributedMatches := attributedToolCallRegex.FindAllStringSubmatch(text, -1)
+	for _, match := range attributedMatches {
+		if len(match) < 3 {
+			continue
+		}
+		if strings.TrimSpace(match[2]) == "" {
+			continue
+		}
+		if parsed := parseAttributedToolCallXML(match[1], match[2]); len(parsed) > 0 {
+			toolCalls = append(toolCalls, parsed...)
+			cleanText = strings.Replace(cleanText, match[0], "", 1)
+		}
+	}
+
 	selfClosingToolCallRegex := regexp.MustCompile(`(?s)<tool_call\s+([^<>]*?)\s*(?:/>|>\s*</tool_call>)`)
 	selfClosingMatches := selfClosingToolCallRegex.FindAllStringSubmatch(text, -1)
 	for _, match := range selfClosingMatches {
@@ -269,6 +284,70 @@ func parseHermesToolCallXML(raw string) []models.ToolCall {
 	}
 
 	return calls
+}
+
+func parseAttributedToolCallXML(attrsRaw string, bodyRaw string) []models.ToolCall {
+	name := xmlAttrValue(attrsRaw, "name")
+	if name == "" {
+		return nil
+	}
+
+	body := strings.TrimSpace(bodyRaw)
+	if body != "" {
+		if parsed := parseToolCallJSON(body); len(parsed) > 0 {
+			return parsed
+		}
+
+		var bodyValue interface{}
+		if err := json.Unmarshal([]byte(body), &bodyValue); err == nil {
+			if bodyArgs, ok := bodyValue.(map[string]interface{}); ok {
+				for key, value := range parseXMLAttrs(attrsRaw) {
+					if key == "name" || key == "arguments" {
+						continue
+					}
+					if _, exists := bodyArgs[key]; !exists {
+						bodyArgs[key] = value
+					}
+				}
+				argsBytes, err := json.Marshal(bodyArgs)
+				if err == nil {
+					return []models.ToolCall{{
+						ID:   "call_" + GenerateID(),
+						Type: "function",
+						Function: models.ToolFunction{
+							Name:      name,
+							Arguments: string(argsBytes),
+						},
+					}}
+				}
+			}
+			argsBytes, err := json.Marshal(bodyValue)
+			if err == nil {
+				return []models.ToolCall{{
+					ID:   "call_" + GenerateID(),
+					Type: "function",
+					Function: models.ToolFunction{
+						Name:      name,
+						Arguments: string(argsBytes),
+					},
+				}}
+			}
+		}
+
+		argsBytes, err := json.Marshal(map[string]string{"content": strings.TrimSpace(html.UnescapeString(body))})
+		if err == nil {
+			return []models.ToolCall{{
+				ID:   "call_" + GenerateID(),
+				Type: "function",
+				Function: models.ToolFunction{
+					Name:      name,
+					Arguments: string(argsBytes),
+				},
+			}}
+		}
+	}
+
+	return parseSelfClosingToolCallXML(attrsRaw)
 }
 
 func parseSelfClosingToolCallXML(raw string) []models.ToolCall {

@@ -18,6 +18,7 @@ type StoredAuth struct {
 	XiaomiChatbot         string `json:"xiaomiChatbotPh,omitempty"`
 	DeepSeekCookie        string `json:"deepseekCookie,omitempty"`
 	DeepSeekToken         string `json:"deepseekToken,omitempty"`
+	WebSessions           map[string]StoredWebSession `json:"webSessions,omitempty"`
 	GeminiAPIKey          string `json:"geminiApiKey,omitempty"`
 	GroqAPIKey            string `json:"groqApiKey,omitempty"`
 	OpenRouterAPIKey      string `json:"openRouterApiKey,omitempty"`

@@ -281,6 +281,58 @@
           <div class="card">
             <div class="section-head">
               <div>
+                <h2>Sessões Web genéricas</h2>
+                <p class="muted">Base para adapters browser-session por provedor. Hoje o adapter implementado é o DeepSeek.</p>
+              </div>
+            </div>
+            <form method="post" action="/settings/web/import">
+              <div class="grid form-grid">
+                <div>
+                  <label for="web_provider">Provedor web</label>
+                  <select id="web_provider" name="provider">
+                    {{range .WebProviders}}
+                    <option value="{{.ID}}">{{.Name}}{{if not .Implemented}} (storage only){{end}}</option>
+                    {{end}}
+                  </select>
+                </div>
+                <div>
+                  <label for="web_token">Token principal</label>
+                  <input id="web_token" name="token" type="password" placeholder="Opcional se vier em headers/storage">
+                </div>
+              </div>
+              <label for="web_raw_cookie">Cookie bruto</label>
+              <textarea id="web_raw_cookie" name="raw_cookie" placeholder="cookie_a=...; cookie_b=..."></textarea>
+              <div class="grid form-grid">
+                <div>
+                  <label for="web_user_agent">User-Agent</label>
+                  <input id="web_user_agent" name="user_agent" type="text" placeholder="Opcional">
+                </div>
+                <div>
+                  <label for="web_origin">Origin</label>
+                  <input id="web_origin" name="origin" type="url" placeholder="https://site.exemplo.com">
+                </div>
+              </div>
+              <label for="web_referer">Referer</label>
+              <input id="web_referer" name="referer" type="url" placeholder="https://site.exemplo.com/">
+              <div class="grid form-grid">
+                <div>
+                  <label for="headers_json">Headers JSON</label>
+                  <textarea id="headers_json" name="headers_json" placeholder='{"x-csrf-token":"..."}'></textarea>
+                </div>
+                <div>
+                  <label for="storage_json">Storage JSON</label>
+                  <textarea id="storage_json" name="storage_json" placeholder='{"userToken":"..."}'></textarea>
+                </div>
+              </div>
+              <div class="actions" style="margin-top: 14px;">
+                <button class="primary" type="submit">Salvar sessão web</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="section-head">
+              <div>
                 <h2>Provedores oficiais</h2>
                 <p class="muted">Gemini, Groq, OpenRouter e Cloudflare.</p>
               </div>
@@ -370,6 +422,41 @@
                 {{else}}
                 <span class="badge missing">pendente</span>
                 {{end}}
+              </div>
+              {{end}}
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-head">
+              <div>
+                <h2>Sessões Web</h2>
+                <p class="muted">Sessões importadas para adapters de navegador.</p>
+              </div>
+            </div>
+            <div class="secret-list">
+              {{if .WebSessions}}
+              {{range .WebSessions}}
+              <div class="secret">
+                <div>
+                  <div><strong>{{.Name}}</strong></div>
+                  <div class="muted">{{.Description}}</div>
+                  <div class="muted">provider: <code>{{.Provider}}</code> • headers: {{.HeaderCount}} • storage: {{.StorageCount}}</div>
+                  {{if .UpdatedAt}}<div class="muted">atualizado em {{.UpdatedAt}}</div>{{end}}
+                </div>
+                <div>
+                  {{if .Implemented}}
+                  <span class="badge">adapter ativo</span>
+                  {{else}}
+                  <span class="badge missing">adapter pendente</span>
+                  {{end}}
+                </div>
+              </div>
+              {{end}}
+              {{else}}
+              <div class="secret">
+                <span>Nenhuma sessão web salva.</span>
+                <span class="badge missing">vazio</span>
               </div>
               {{end}}
             </div>

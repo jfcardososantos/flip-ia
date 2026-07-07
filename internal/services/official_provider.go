@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"flip-ai/internal/models"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -122,7 +122,7 @@ func ForwardOfficialChat(provider OfficialProvider, rawBody []byte) (*http.Respo
 	if err := json.Unmarshal(rawBody, &payload); err != nil {
 		return nil, err
 	}
-	payload["model"] = provider.Model
+	prepareOfficialProviderPayload(provider, payload)
 	payloadBytes, _ := json.Marshal(payload)
 
 	endpoint := strings.TrimRight(provider.BaseURL, "/") + "/chat/completions"
@@ -138,6 +138,10 @@ func ForwardOfficialChat(provider OfficialProvider, rawBody []byte) (*http.Respo
 	}
 
 	return GlobalHTTPClient.Do(req)
+}
+
+func prepareOfficialProviderPayload(provider OfficialProvider, payload map[string]interface{}) {
+	payload["model"] = provider.Model
 }
 
 func ReadOfficialProviderBody(resp *http.Response) ([]byte, error) {

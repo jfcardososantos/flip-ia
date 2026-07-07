@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -119,9 +120,15 @@ func mergeXiaomiAuth(existing services.StoredAuth, rawCookie string, token strin
 }
 
 func mergeDeepSeekAuth(existing services.StoredAuth, rawCookie string, token string) services.StoredAuth {
-	existing.DeepSeekCookie = strings.TrimSpace(rawCookie)
-	existing.DeepSeekToken = strings.TrimSpace(token)
-	return existing
+	return services.UpsertStoredWebSession(existing, "deepseek", services.StoredWebSession{
+		Provider: "deepseek",
+		Cookie:   strings.TrimSpace(rawCookie),
+		Token:    strings.TrimSpace(token),
+		Storage: map[string]string{
+			"userToken": strings.TrimSpace(token),
+		},
+		Source: "manual-import",
+	})
 }
 
 func mergeProviderAuth(existing services.StoredAuth, provider string, apiKey string, accountID string, httpReferer string, appTitle string) (services.StoredAuth, error) {
@@ -200,6 +207,7 @@ func hasStoredAuth(stored services.StoredAuth, storedErr error) bool {
 			strings.TrimSpace(stored.ServiceToken) != "" ||
 			strings.TrimSpace(stored.UserID) != "" ||
 			strings.TrimSpace(stored.XiaomiChatbot) != "" ||
+			len(services.StoredWebSessions(stored)) > 0 ||
 			strings.TrimSpace(stored.DeepSeekCookie) != "" ||
 			strings.TrimSpace(stored.DeepSeekToken) != "" ||
 			strings.TrimSpace(stored.GeminiAPIKey) != "" ||
@@ -512,6 +520,54 @@ func maskedStoredAuth(stored services.StoredAuth) gin.H {
 	}
 }
 
+func maskedWebSessions(stored services.StoredAuth) []gin.H {
+	sessions := services.StoredWebSessions(stored)
+	if len(sessions) == 0 {
+		return nil
+	}
+
+	definitions := services.WebProviderDefinitions()
+	known := make(map[string]services.WebProviderDefinition)
+	for _, definition := range definitions {
+		known[definition.ID] = definition
+	}
+
+	keys := make([]string, 0, len(sessions))
+	for key := range sessions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	rows := make([]gin.H, 0, len(keys))
+	for _, key := range keys {
+		session := sessions[key]
+		definition, ok := known[key]
+		name := key
+		description := "Sessao web salva."
+		implemented := false
+		if ok {
+			name = definition.Name
+			description = definition.Description
+			implemented = definition.Implemented
+		}
+		rows = append(rows, gin.H{
+			"Provider":     key,
+			"Name":         name,
+			"Cookie":       maskValue(session.Cookie),
+			"Token":        maskValue(services.WebSessionToken(session)),
+			"UserAgent":    maskValue(session.UserAgent),
+			"Source":       session.Source,
+			"UpdatedAt":    session.UpdatedAt,
+			"Implemented":  implemented,
+			"Description":  description,
+			"HeaderCount":  len(session.Headers),
+			"StorageCount": len(session.Storage),
+		})
+	}
+
+	return rows
+}
+
 func totalTrackedProviderRequests() gin.H {
 	tokenStats, tokenUsage, responseTimes := routes.GetStats()
 	totalRequests := 0
@@ -584,6 +640,8 @@ func renderSettings(c *gin.Context, status int, message string, errorMessage str
 		"AuthStore":         services.AuthStorePathForDisplay(),
 		"StoredError":       errString(storedAuthErr),
 		"Stored":            maskedStoredAuth(storedAuth),
+		"WebSessions":       maskedWebSessions(storedAuth),
+		"WebProviders":      services.WebProviderDefinitions(),
 		"Providers":         providerRows(storedAuth, storedAuthErr),
 		"ExtensionDownload": "/downloads/flip-ai-session-extension.zip",
 		"DefaultModel":      services.ConfiguredDefaultModel(),
@@ -591,6 +649,19 @@ func renderSettings(c *gin.Context, status int, message string, errorMessage str
 		"RequestAuth":       services.RequestAuthEnabled(),
 		"RequestKeySource":  requestAPIKeySource(storedAuth),
 	})
+}
+
+func decodeStringMap(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	var values map[string]string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func requireSettingsAccess(c *gin.Context) bool {
@@ -786,6 +857,46 @@ func main() {
 		renderSettings(c, http.StatusOK, "Sessão DeepSeek salva.", "", true)
 	})
 
+	r.POST("/settings/web/import", func(c *gin.Context) {
+		if !requireSettingsAccess(c) {
+			return
+		}
+
+		headers, err := decodeStringMap(c.PostForm("headers_json"))
+		if err != nil {
+			renderSettings(c, http.StatusBadRequest, "", "Headers JSON inválido: "+err.Error(), true)
+			return
+		}
+		storage, err := decodeStringMap(c.PostForm("storage_json"))
+		if err != nil {
+			renderSettings(c, http.StatusBadRequest, "", "Storage JSON inválido: "+err.Error(), true)
+			return
+		}
+
+		session, err := services.ValidateWebSessionInput(c.PostForm("provider"), services.StoredWebSession{
+			Cookie:    c.PostForm("raw_cookie"),
+			Token:     c.PostForm("token"),
+			UserAgent: c.PostForm("user_agent"),
+			Origin:    c.PostForm("origin"),
+			Referer:   c.PostForm("referer"),
+			Headers:   headers,
+			Storage:   storage,
+			Source:    "settings",
+		})
+		if err != nil {
+			renderSettings(c, http.StatusBadRequest, "", "Sessão web inválida: "+err.Error(), true)
+			return
+		}
+
+		existing, _ := services.LoadStoredAuth()
+		stored := services.UpsertStoredWebSession(existing, session.Provider, session)
+		if err := services.SaveStoredAuth(stored); err != nil {
+			renderSettings(c, http.StatusInternalServerError, "", "Falha ao salvar sessão web: "+err.Error(), true)
+			return
+		}
+		renderSettings(c, http.StatusOK, "Sessão web salva para "+session.Provider+".", "", true)
+	})
+
 	r.POST("/settings/provider/import", func(c *gin.Context) {
 		if !requireSettingsAccess(c) {
 			return
@@ -873,6 +984,7 @@ func main() {
 			"deepseekConfigured":      stored.DeepSeekCookie != "" && stored.DeepSeekToken != "",
 			"storedHasDeepSeekCookie": stored.DeepSeekCookie != "",
 			"storedHasDeepSeekToken":  stored.DeepSeekToken != "",
+			"webSessions":            maskedWebSessions(stored),
 			"defaultModel":            services.ConfiguredDefaultModel(),
 			"defaultModelSource":      defaultModelSource(stored),
 			"requestAuthEnabled":      services.RequestAuthEnabled(),
@@ -930,6 +1042,7 @@ func main() {
 				"DEFAULT_MODEL":           maskValue(stored.DefaultModel),
 				"REQUEST_API_KEY":         maskValue(stored.RequestAPIKey),
 			},
+			"webSessions": maskedWebSessions(stored),
 			"selectedAuth": gin.H{
 				"token": maskValue(auth.Token),
 				"userID": maskValue(auth.UserID),
@@ -1048,7 +1161,15 @@ func main() {
 		}
 
 		existing, _ := services.LoadStoredAuth()
-		stored := mergeDeepSeekAuth(existing, auth.Cookie, auth.Token)
+		stored := services.UpsertStoredWebSession(existing, "deepseek", services.StoredWebSession{
+			Provider: "deepseek",
+			Cookie:   auth.Cookie,
+			Token:    auth.Token,
+			Storage: map[string]string{
+				"userToken": auth.Token,
+			},
+			Source: payload.Source,
+		})
 		if err := services.SaveStoredAuth(stored); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist DeepSeek session", "details": err.Error()})
 			return
@@ -1094,7 +1215,15 @@ func main() {
 		}
 
 		existing, _ := services.LoadStoredAuth()
-		stored := mergeDeepSeekAuth(existing, auth.Cookie, auth.Token)
+		stored := services.UpsertStoredWebSession(existing, "deepseek", services.StoredWebSession{
+			Provider: "deepseek",
+			Cookie:   auth.Cookie,
+			Token:    auth.Token,
+			Storage: map[string]string{
+				"userToken": auth.Token,
+			},
+			Source: "manual-import",
+		})
 		if err := services.SaveStoredAuth(stored); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist DeepSeek credentials", "details": err.Error()})
 			return
@@ -1104,6 +1233,89 @@ func main() {
 			"saved":      true,
 			"authSource": "data/auth.json",
 			"storePath":  services.AuthStorePathForDisplay(),
+		})
+	})
+
+	r.POST("/auth/web/import", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+
+		var payload struct {
+			Provider   string            `json:"provider" form:"provider"`
+			RawCookie  string            `json:"raw_cookie" form:"raw_cookie"`
+			Token      string            `json:"token" form:"token"`
+			UserAgent  string            `json:"user_agent" form:"user_agent"`
+			Origin     string            `json:"origin" form:"origin"`
+			Referer    string            `json:"referer" form:"referer"`
+			Headers    map[string]string `json:"headers"`
+			Storage    map[string]string `json:"storage"`
+			HeadersJSON string           `json:"headers_json" form:"headers_json"`
+			StorageJSON string           `json:"storage_json" form:"storage_json"`
+			Source     string            `json:"source" form:"source"`
+		}
+
+		if strings.Contains(c.GetHeader("Content-Type"), "application/json") {
+			body, _ := io.ReadAll(c.Request.Body)
+			if len(strings.TrimSpace(string(body))) > 0 {
+				if err := json.Unmarshal(body, &payload); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON payload", "details": err.Error()})
+					return
+				}
+			}
+		} else if err := c.ShouldBind(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid form payload", "details": err.Error()})
+			return
+		}
+
+		if payload.Headers == nil {
+			headers, err := decodeStringMap(payload.HeadersJSON)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid headers_json", "details": err.Error()})
+				return
+			}
+			payload.Headers = headers
+		}
+		if payload.Storage == nil {
+			storage, err := decodeStringMap(payload.StorageJSON)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid storage_json", "details": err.Error()})
+				return
+			}
+			payload.Storage = storage
+		}
+
+		session, err := services.ValidateWebSessionInput(payload.Provider, services.StoredWebSession{
+			Cookie:    payload.RawCookie,
+			Token:     payload.Token,
+			UserAgent: payload.UserAgent,
+			Origin:    payload.Origin,
+			Referer:   payload.Referer,
+			Headers:   payload.Headers,
+			Storage:   payload.Storage,
+			Source:    payload.Source,
+		})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid web session", "details": err.Error()})
+			return
+		}
+
+		existing, _ := services.LoadStoredAuth()
+		stored := services.UpsertStoredWebSession(existing, session.Provider, session)
+		if err := services.SaveStoredAuth(stored); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist web session", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"saved":         true,
+			"provider":      session.Provider,
+			"implemented":   session.Provider == "deepseek",
+			"authSource":    "data/auth.json",
+			"storePath":     services.AuthStorePathForDisplay(),
+			"importedFrom":  session.Source,
+			"cookiePresent": strings.TrimSpace(session.Cookie) != "",
+			"tokenPresent":  strings.TrimSpace(services.WebSessionToken(session)) != "",
 		})
 	})
 

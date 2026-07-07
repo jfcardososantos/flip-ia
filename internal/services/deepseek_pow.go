@@ -29,8 +29,8 @@ type deepSeekPoWChallenge struct {
 	TargetPath string  `json:"target_path"`
 }
 
-func GetDeepSeekPoWResponse(auth models.DeepSeekAuth, customHeaders map[string]string) (string, error) {
-	challenge, err := fetchDeepSeekPoWChallenge(auth, customHeaders)
+func GetDeepSeekPoWResponse(auth models.DeepSeekAuth, session StoredWebSession, customHeaders map[string]string) (string, error) {
+	challenge, err := fetchDeepSeekPoWChallenge(auth, session, customHeaders)
 	if err != nil {
 		return "", err
 	}
@@ -55,10 +55,10 @@ func GetDeepSeekPoWResponse(auth models.DeepSeekAuth, customHeaders map[string]s
 	return base64.StdEncoding.EncodeToString(payloadBytes), nil
 }
 
-func fetchDeepSeekPoWChallenge(auth models.DeepSeekAuth, customHeaders map[string]string) (deepSeekPoWChallenge, error) {
+func fetchDeepSeekPoWChallenge(auth models.DeepSeekAuth, session StoredWebSession, customHeaders map[string]string) (deepSeekPoWChallenge, error) {
 	payloadBytes, _ := json.Marshal(map[string]string{"target_path": deepSeekPowTargetPath})
 	req, _ := http.NewRequest("POST", deepSeekBaseURL+"/api/v0/chat/create_pow_challenge", bytes.NewBuffer(payloadBytes))
-	for k, v := range DeepSeekHeaders(auth, customHeaders) {
+	for k, v := range DeepSeekHeaders(auth, session, customHeaders) {
 		req.Header.Set(k, v)
 	}
 

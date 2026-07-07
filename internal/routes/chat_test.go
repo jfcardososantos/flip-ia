@@ -122,6 +122,28 @@ func TestSynthesizeReadCommandToolCalls(t *testing.T) {
 	}
 }
 
+func TestParseMimoChatBodyAttributedToolCall(t *testing.T) {
+	body := strings.NewReader("event: message\n" +
+		"data: {\"content\":\"O ambiente execute_code usa Python isolado.\\n<tool_call name=\\\"terminal\\\">{\\\"command\\\":\\\"source ~/composio-venv-uv/bin/activate && python -V && deactivate\\\",\\\"timeout\\\":30}</tool_call>\"}\n\n")
+
+	result := parseMimoChatBody(body, "test", "mimo", "query", nil, false)
+	if result.FinishReason != "tool_calls" {
+		t.Fatalf("expected tool_calls finish reason, got %s with clean text %q", result.FinishReason, result.CleanText)
+	}
+	if result.CleanText != "" {
+		t.Fatalf("expected empty clean text for tool call response, got %q", result.CleanText)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].Function.Name != "terminal" {
+		t.Fatalf("unexpected tool name: %s", result.ToolCalls[0].Function.Name)
+	}
+	if !strings.Contains(result.ToolCalls[0].Function.Arguments, "composio-venv-uv") {
+		t.Fatalf("unexpected arguments: %s", result.ToolCalls[0].Function.Arguments)
+	}
+}
+
 func TestShouldRetryAgentToolCallForPortugueseActionIntent(t *testing.T) {
 	result := parsedMimoChat{
 		CleanText: `Além disso, notei que o prompt positivo no workflow está vazio.

@@ -91,12 +91,13 @@ type ContentPart struct {
 }
 
 type Tool struct {
-	Type     string       `json:"type"`
+	Type     string         `json:"type"`
 	Function ToolDefinition `json:"function"`
 }
 
 type ToolDefinition struct {
 	Name        string      `json:"name"`
+	Strict      bool        `json:"strict,omitempty"`
 	Description string      `json:"description,omitempty"`
 	Parameters  interface{} `json:"parameters"`
 }

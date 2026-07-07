@@ -489,12 +489,12 @@ func handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	if services.IsDeepSeekModel(targetModel) {
-		handleDeepSeekChatCompletions(c, input, completionID, cacheKey, targetModel)
-		return
-	}
 	if provider, ok := services.SelectOfficialProvider(targetModel); ok {
 		handleOfficialProviderChatCompletions(c, input, bodyCopy, completionID, targetModel, provider)
+		return
+	}
+	if services.IsDeepSeekModel(targetModel) {
+		handleDeepSeekChatCompletions(c, input, completionID, cacheKey, targetModel)
 		return
 	}
 
@@ -795,7 +795,7 @@ func handleChatCompletions(c *gin.Context) {
 }
 
 func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {
-	auth, err := services.GetSelectedDeepSeekAuth()
+	session, auth, err := services.GetSelectedDeepSeekSession()
 	if err != nil {
 		utils.SendError(c, http.StatusInternalServerError, "Invalid DeepSeek auth configuration: "+err.Error(), "server_error", nil)
 		return
@@ -820,7 +820,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 		}
 	}
 	if sessionID == "" {
-		sessionID, err = services.CreateDeepSeekSession(auth, customHeaders)
+		sessionID, err = services.CreateDeepSeekSession(auth, session, customHeaders)
 		if err != nil {
 			fmt.Printf("[%s] DeepSeek create session failed: %v\n", completionID, err)
 			utils.SendError(c, http.StatusBadGateway, "Failed to create DeepSeek chat session: "+err.Error(), "server_error", nil)
@@ -847,7 +847,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	thinking := deepSeekThinkingEnabled(targetModel)
 	search := input.WebSearch || strings.Contains(strings.ToLower(targetModel), "search")
 
-	resp, err := services.SendDeepSeekChatRequest(auth, sessionID, prompt, thinking, search, customHeaders)
+	resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, prompt, thinking, search, customHeaders)
 	if err != nil {
 		if err == services.ErrDeepSeekPoWRequired {
 			fmt.Printf("[%s] DeepSeek PoW required but solver did not return a response\n", completionID)
@@ -1217,11 +1217,10 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	}
 
 	if inToolCall && toolCallBuffer.Len() > 0 {
-		fullText.WriteString(utils.ToolCallOpenTag)
-		fullText.WriteString(toolCallBuffer.String())
-		fullText.WriteString(utils.ToolCallCloseTag)
+		rawToolCall := completeToolCallBuffer(toolCallBuffer.String())
+		fullText.WriteString(rawToolCall)
 
-		if _, parsedToolCalls := utils.ParseToolCalls(utils.ToolCallOpenTag + toolCallBuffer.String() + utils.ToolCallCloseTag); len(parsedToolCalls) > 0 {
+		if _, parsedToolCalls := utils.ParseToolCalls(rawToolCall); len(parsedToolCalls) > 0 {
 			parsedToolCalls = utils.AssignToolCallIndexes(parsedToolCalls)
 			parsedToolCalls[0].Index = toolCallIndex
 			utils.EmitStreamToolCall(c, completionID, model, parsedToolCalls[0])
@@ -1347,9 +1346,7 @@ func parseMimoChatBody(body io.Reader, completionID, model, query string, parall
 	}
 
 	if inToolCall && toolCallBuffer.Len() > 0 {
-		fullText.WriteString(utils.ToolCallOpenTag)
-		fullText.WriteString(toolCallBuffer.String())
-		fullText.WriteString(utils.ToolCallCloseTag)
+		fullText.WriteString(completeToolCallBuffer(toolCallBuffer.String()))
 	}
 
 	cleanText, toolCalls := utils.ParseToolCalls(fullText.String())
@@ -1845,9 +1842,7 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 	}
 
 	if inToolCall && toolCallBuffer.Len() > 0 {
-		fullText.WriteString(utils.ToolCallOpenTag)
-		fullText.WriteString(toolCallBuffer.String())
-		fullText.WriteString(utils.ToolCallCloseTag)
+		fullText.WriteString(completeToolCallBuffer(toolCallBuffer.String()))
 	}
 
 	cleanText, toolCalls := utils.ParseToolCalls(fullText.String())
@@ -1908,6 +1903,39 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 		services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+func completeToolCallBuffer(raw string) string {
+	if strings.Contains(raw, utils.ToolCallCloseTag) {
+		return raw
+	}
+	return raw + utils.ToolCallCloseTag
+}
+
+func findToolCallOpeningTag(s string) (int, int) {
+	searchFrom := 0
+	for {
+		idx := strings.Index(s[searchFrom:], "<tool_call")
+		if idx == -1 {
+			return -1, -1
+		}
+		idx += searchFrom
+
+		afterName := idx + len("<tool_call")
+		if afterName < len(s) {
+			next := s[afterName]
+			if next != '>' && next != ' ' && next != '\n' && next != '\t' && next != '\r' {
+				searchFrom = afterName
+				continue
+			}
+		}
+
+		closeIdx := strings.Index(s[idx:], ">")
+		if closeIdx == -1 {
+			return idx, len(s)
+		}
+		return idx, idx + closeIdx + 1
+	}
 }
 
 func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
@@ -1987,10 +2015,9 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 			toolCallBuffer.WriteString(contentToProcess)
 
 			if endIdx != -1 {
-				rawToolCall := "<tool_call>" + toolCallBuffer.String() + "</tool_call>"
-				fullText.WriteString("<tool_call>")
-				fullText.WriteString(toolCallBuffer.String())
-				fullText.WriteString("</tool_call>")
+				toolCallBuffer.WriteString(utils.ToolCallCloseTag)
+				rawToolCall := toolCallBuffer.String()
+				fullText.WriteString(rawToolCall)
 
 				if isStreaming {
 					_, parsedToolCalls := utils.ParseToolCalls(rawToolCall)
@@ -2014,7 +2041,7 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 		}
 
 		thinkStartIdx := strings.Index(remaining, utils.ThinkingOpenTag)
-		toolStartIdx := strings.Index(remaining, utils.ToolCallOpenTag)
+		toolStartIdx, toolOpenEndIdx := findToolCallOpeningTag(remaining)
 
 		if thinkStartIdx != -1 && (toolStartIdx == -1 || thinkStartIdx < toolStartIdx) {
 			text := remaining[:thinkStartIdx]
@@ -2045,7 +2072,8 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 			}
 			*inToolCall = true
 			toolCallBuffer.Reset()
-			remaining = remaining[toolStartIdx+len(utils.ToolCallOpenTag):]
+			toolCallBuffer.WriteString(remaining[toolStartIdx:toolOpenEndIdx])
+			remaining = remaining[toolOpenEndIdx:]
 			continue
 		}
 

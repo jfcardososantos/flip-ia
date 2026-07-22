@@ -195,6 +195,10 @@ func foldKimiMessages(messages []models.Message) (string, string, error) {
 			if text != "" {
 				conversation = append(conversation, "Assistant: "+text)
 			}
+		case "tool", "function":
+			if text != "" {
+				conversation = append(conversation, "Tool result: "+text)
+			}
 		default:
 			return "", "", fmt.Errorf("Kimi Web does not support message role %s", message.Role)
 		}

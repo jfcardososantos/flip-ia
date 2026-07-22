@@ -804,27 +804,39 @@ func handleChatCompletions(c *gin.Context) {
 }
 
 func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {
-	if len(input.Tools) > 0 {
-		utils.SendError(c, http.StatusBadRequest, "Kimi Web does not support OpenAI tools.", "invalid_request_error", nil)
-		return
-	}
 	session, accessToken, err := services.GetSelectedKimiSession()
 	if err != nil {
 		utils.SendError(c, http.StatusServiceUnavailable, "Invalid Kimi Web session: "+err.Error(), "server_error", nil)
 		return
 	}
-	result, err := services.KimiChat(session, accessToken, input.Messages)
+	agentMode := len(input.Tools) > 0
+	messages := append([]models.Message{}, input.Messages...)
+	if agentMode {
+		toolChoice := resolveToolChoice(input.ToolChoice)
+		toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
+		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
+	}
+	result, err := services.KimiChat(session, accessToken, messages)
 	if err != nil {
 		utils.SendError(c, http.StatusBadGateway, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
 		return
 	}
-	deepSeekResult := models.DeepSeekChatResult{Content: result.Content, ReasoningText: result.ReasoningText}
-	deepSeekResult.Usage = services.EstimateUsageFromMessages(input.Messages, result.Content)
+	content, toolCalls := utils.ParseToolCalls(result.Content)
+	toolCalls = finalizeToolCalls(toolCalls)
+	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
+	if len(toolCalls) > 0 {
+		content = ""
+		if sessionHandle := services.GenerateFingerprint(input.Messages); sessionHandle != "" {
+			storePendingToolCalls(sessionHandle, toolCalls)
+		}
+	}
+	deepSeekResult := models.DeepSeekChatResult{Content: content, ReasoningText: result.ReasoningText}
+	deepSeekResult.Usage = services.EstimateUsageFromMessages(input.Messages, content)
 	if input.Stream {
-		writeDeepSeekStreamResponse(c, completionID, targetModel, deepSeekResult, nil)
+		writeDeepSeekStreamResponse(c, completionID, targetModel, deepSeekResult, responseCalls)
 		return
 	}
-	response := buildDeepSeekNonStreamResponse(completionID, targetModel, deepSeekResult, nil)
+	response := buildDeepSeekNonStreamResponse(completionID, targetModel, deepSeekResult, responseCalls)
 	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	c.JSON(http.StatusOK, response)
 }

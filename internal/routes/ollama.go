@@ -385,8 +385,8 @@ func runOllamaRequest(c *gin.Context, spec ollamaRequestSpec) {
 
 func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel string, startedAt time.Time) {
 	if len(spec.Tools) > 0 {
-		writeOllamaError(c, spec.Stream, http.StatusBadRequest, "Kimi Web does not support Ollama tools")
-		return
+		toolInstructions := utils.FormatToolsAsInstructionsWithChoice(spec.Tools, "auto")
+		spec.Messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, spec.Messages...)
 	}
 	session, accessToken, err := services.GetSelectedKimiSession()
 	if err != nil {
@@ -398,12 +398,20 @@ func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel st
 		writeOllamaError(c, spec.Stream, http.StatusBadGateway, "Failed to call Kimi Web: "+err.Error())
 		return
 	}
-	usage := estimateOllamaUsage(spec.Messages, result.Content)
+	content, toolCalls := utils.ParseToolCalls(result.Content)
+	toolCalls = utils.AssignToolCallIndexes(toolCalls)
+	if len(toolCalls) > 0 {
+		content = ""
+		if sessionHandle := services.GenerateFingerprint(spec.Messages); sessionHandle != "" {
+			storePendingToolCalls(sessionHandle, toolCalls)
+		}
+	}
+	usage := estimateOllamaUsage(spec.Messages, content)
 	if spec.Stream {
-		streamBufferedOllamaResult(c, spec, targetModel, result.Content, result.ReasoningText, nil, "stop", usage, startedAt)
+		streamBufferedOllamaResult(c, spec, targetModel, content, result.ReasoningText, toolCalls, "stop", usage, startedAt)
 		return
 	}
-	respondBufferedOllamaResult(c, spec, targetModel, result.Content, result.ReasoningText, nil, "stop", usage, startedAt)
+	respondBufferedOllamaResult(c, spec, targetModel, content, result.ReasoningText, toolCalls, "stop", usage, startedAt)
 }
 
 func runOfficialOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel string, provider services.OfficialProvider, startedAt time.Time) {

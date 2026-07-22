@@ -403,7 +403,7 @@ func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel st
 		streamBufferedOllamaResult(c, spec, targetModel, result.Content, result.ReasoningText, nil, "stop", usage, startedAt)
 		return
 	}
-	writeOllamaBufferedResult(c, spec, targetModel, result.Content, result.ReasoningText, nil, "stop", usage, startedAt)
+	respondBufferedOllamaResult(c, spec, targetModel, result.Content, result.ReasoningText, nil, "stop", usage, startedAt)
 }
 
 func runOfficialOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel string, provider services.OfficialProvider, startedAt time.Time) {

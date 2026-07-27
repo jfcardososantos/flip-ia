@@ -11,11 +11,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"fmt"
-	"io"
 	"flip-ai/internal/models"
 	"flip-ai/internal/services"
 	"flip-ai/internal/utils"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,15 +28,16 @@ import (
 )
 
 var (
-	TokenStats      = make(map[string]int)
-	TokenUsageStats = make(map[string]int)
-	ResponseTimes   = make([]int64, 0)
-	StatsMutex      sync.Mutex
+	TokenStats       = make(map[string]int)
+	TokenUsageStats  = make(map[string]int)
+	ResponseTimes    = make([]int64, 0)
+	StatsMutex       sync.Mutex
+	qwenSessionLocks sync.Map
 )
 
 var (
-	agentLocationOnlyRegex = regexp.MustCompile(`(?i)^\s*(?:/[^\n]+|[A-Za-z]:\\[^\n]+|\.{0,2}/[^\n]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)(?::|\s+)\d+(?::|\s+)\d+\s*$`)
-	agentPathLocationRegex = regexp.MustCompile(`(?i)((?:/[^\s]+|[A-Za-z]:\\[^\s]+|\.{1,2}/[^\s]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml))(?:(?::|\s+)\d+(?::|\s+)\d+)?`)
+	agentLocationOnlyRegex    = regexp.MustCompile(`(?i)^\s*(?:/[^\n]+|[A-Za-z]:\\[^\n]+|\.{0,2}/[^\n]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)(?::|\s+)\d+(?::|\s+)\d+\s*$`)
+	agentPathLocationRegex    = regexp.MustCompile(`(?i)((?:/[^\s]+|[A-Za-z]:\\[^\s]+|\.{1,2}/[^\s]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml))(?:(?::|\s+)\d+(?::|\s+)\d+)?`)
 	clientIdentityPromptRegex = regexp.MustCompile(`(?im)^\s*(you are|you're|you act as|you will act as)\s+(an?\s+)?(hermes(?:\s+agent)?|kilo(?:\s+code)?|cline|roo(?:\s+code)?|cursor(?:\s+agent)?|ide\s+agent)\b[^\n]*`)
 )
 
@@ -225,6 +226,26 @@ func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]inte
 		map[string]interface{}{
 			"id": "kimi-k2.6", "object": "model", "created": 1752969600, "owned_by": "moonshot",
 			"description": "Kimi K2.6 web chat session",
+		},
+		map[string]interface{}{
+			"id": "qwen-web", "object": "model", "created": 1785110400, "owned_by": "qwen",
+			"description": "Qwen Web persistent chat (qwen3.7-plus, 1M context)",
+		},
+		map[string]interface{}{
+			"id": "qwen-web/qwen3.7-plus", "object": "model", "created": 1785110400, "owned_by": "qwen",
+			"description": "Qwen 3.7 Plus Web persistent chat (1M context)",
+		},
+		map[string]interface{}{
+			"id": "qwen-web/qwen3.8-max-preview", "object": "model", "created": 1785110400, "owned_by": "qwen",
+			"description": "Qwen 3.8 Max Preview Web persistent chat (1M context)",
+		},
+		map[string]interface{}{
+			"id": "qwen-web/qwen3.7-max", "object": "model", "created": 1785110400, "owned_by": "qwen",
+			"description": "Qwen 3.7 Max Web persistent chat (1M context)",
+		},
+		map[string]interface{}{
+			"id": "qwen-web/qwen3.6-plus", "object": "model", "created": 1785110400, "owned_by": "qwen",
+			"description": "Qwen 3.6 Plus Web persistent chat (1M context)",
 		},
 	)
 	return modelsList
@@ -501,6 +522,10 @@ func handleChatCompletions(c *gin.Context) {
 		handleKimiChatCompletions(c, input, completionID, cacheKey, targetModel)
 		return
 	}
+	if services.IsQwenWebModel(targetModel) {
+		handleQwenChatCompletions(c, input, completionID, cacheKey, targetModel)
+		return
+	}
 
 	if provider, ok := services.SelectOfficialProvider(targetModel); ok {
 		handleOfficialProviderChatCompletions(c, input, bodyCopy, completionID, targetModel, provider)
@@ -551,7 +576,7 @@ func handleChatCompletions(c *gin.Context) {
 						ID:      "chatcmpl-" + completionID,
 						Object:  "chat.completion.chunk",
 						Created: time.Now().Unix(),
-								Model:   targetModel,
+						Model:   targetModel,
 						Choices: []models.Choice{
 							{
 								Index: 0,
@@ -805,6 +830,229 @@ func handleChatCompletions(c *gin.Context) {
 	}
 
 	processNonStream(c, bodyReader, completionID, targetModel, cacheKey, historyID, query, statToken, input.ParallelToolCalls, len(input.Tools) == 0, agentMode)
+}
+
+func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {
+	session, err := services.GetSelectedQwenSession()
+	if err != nil {
+		utils.SendError(c, http.StatusServiceUnavailable, "Invalid Qwen Web session: "+err.Error(), "server_error", nil)
+		return
+	}
+	upstreamModel, ok := services.ResolveQwenWebModel(targetModel)
+	if !ok {
+		utils.SendError(c, http.StatusBadRequest, "Unsupported Qwen Web model: "+targetModel, "invalid_request_error", nil)
+		return
+	}
+
+	sessionHandle := strings.TrimSpace(input.User)
+	if sessionHandle == "" {
+		sessionHandle = services.GenerateFingerprint(input.Messages)
+	}
+	if sessionHandle == "" {
+		sessionHandle = "qwen_" + completionID
+	}
+	lockValue, _ := qwenSessionLocks.LoadOrStore(sessionHandle, &sync.Mutex{})
+	sessionLock := lockValue.(*sync.Mutex)
+	sessionLock.Lock()
+	defer sessionLock.Unlock()
+
+	agentMode := len(input.Tools) > 0
+	toolChoice := resolveToolChoice(input.ToolChoice)
+	toolInstructions := ""
+	if agentMode && utils.AgentFastModeEnabled() {
+		toolInstructions = utils.FormatToolsAsInstructionsCompact(input.Tools, toolChoice)
+	} else if agentMode {
+		toolInstructions = utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
+	}
+
+	state, _ := services.GetWebChatState("qwen", sessionHandle)
+	if state.Provider == "" {
+		state.Provider = "qwen"
+		state.SessionKey = sessionHandle
+	}
+	forceRollover := state.ChatID != "" && state.Model != "" && state.Model != upstreamModel
+	rolloverForLimit := false
+	if state.ChatID != "" {
+		pendingMessages := qwenUnsentMessages(input.Messages, state)
+		pendingTokens := len(buildQwenPrompt(pendingMessages, toolInstructions)) / 4
+		rolloverForLimit = state.EstimatedTokens+pendingTokens >= services.QwenRolloverTokenLimit()
+	}
+	if rolloverForLimit {
+		forceRollover = true
+	}
+	if state.ChatID != "" && state.ClientMessageCount > 0 {
+		lastIndex := state.ClientMessageCount - 1
+		if lastIndex >= len(input.Messages) ||
+			state.LastMessageHash == "" ||
+			services.QwenMessageHash(input.Messages[lastIndex]) != state.LastMessageHash {
+			forceRollover = true
+		}
+	}
+
+	baseTitle := qwenChatTitle(input.Messages)
+	if state.Title == "" {
+		state.Title = baseTitle
+	}
+	continuationCapsule := ""
+	if forceRollover && rolloverForLimit && state.ChatID != "" {
+		capsulePrompt := "Create a compact but complete continuation capsule for a new chat. Include the active objective, decisions, constraints, important file paths/identifiers, completed work, unresolved problems, and the exact next actions. Preserve critical technical details. Output only the capsule."
+		capsuleResult, _, capsuleErr := services.QwenWebChat(session, upstreamModel, state, capsulePrompt, state.Title, false, false)
+		if capsuleErr == nil {
+			continuationCapsule = strings.TrimSpace(capsuleResult.Content)
+		} else {
+			fmt.Printf("[%s] Qwen continuation capsule failed, using local handoff: %v\n", completionID, capsuleErr)
+		}
+	}
+	if forceRollover {
+		state.ChatID = ""
+		state.ParentMessageID = ""
+		state.EstimatedTokens = 0
+		state.ClientMessageCount = 0
+		state.LastMessageHash = ""
+		state.RolloverCount++
+		state.Title = qwenContinuationTitle(baseTitle, state.RolloverCount)
+	}
+
+	promptMessages := qwenUnsentMessages(input.Messages, state)
+	prompt := buildQwenPrompt(promptMessages, toolInstructions)
+	if forceRollover {
+		prompt = buildQwenHandoff(input.Messages, toolInstructions, continuationCapsule, state.RolloverCount)
+	}
+	if strings.TrimSpace(prompt) == "" {
+		utils.SendError(c, http.StatusBadRequest, "Qwen prompt is empty", "invalid_request_error", nil)
+		return
+	}
+
+	thinking := !agentMode
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("QWEN_WEB_THINKING")), "false") || os.Getenv("QWEN_WEB_THINKING") == "0" {
+		thinking = false
+	}
+	search := input.WebSearch || strings.Contains(strings.ToLower(targetModel), "search")
+	result, updatedState, err := services.QwenWebChat(session, upstreamModel, state, prompt, state.Title, thinking, search)
+	if err != nil && services.IsQwenContextError(err) {
+		state.ChatID = ""
+		state.ParentMessageID = ""
+		state.EstimatedTokens = 0
+		state.ClientMessageCount = 0
+		state.LastMessageHash = ""
+		state.RolloverCount++
+		state.Title = qwenContinuationTitle(baseTitle, state.RolloverCount)
+		prompt = buildQwenHandoff(input.Messages, toolInstructions, "", state.RolloverCount)
+		result, updatedState, err = services.QwenWebChat(session, upstreamModel, state, prompt, state.Title, thinking, search)
+	}
+	if err != nil {
+		utils.SendError(c, http.StatusBadGateway, "Failed to call Qwen Web: "+err.Error()+". If Qwen requested verification, open chat.qwen.ai in Chrome and import the session again.", "server_error", nil)
+		return
+	}
+
+	promptTokens := len(prompt) / 4
+	if result.Usage.PromptTokens == 0 {
+		result.Usage.PromptTokens = promptTokens
+	}
+	if result.Usage.TotalTokens == 0 {
+		result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
+	}
+	updatedState.EstimatedTokens += promptTokens + result.Usage.CompletionTokens
+	updatedState.ClientMessageCount = len(input.Messages)
+	if len(input.Messages) > 0 {
+		updatedState.LastMessageHash = services.QwenMessageHash(input.Messages[len(input.Messages)-1])
+	}
+	if err := services.SaveWebChatState(updatedState); err != nil {
+		fmt.Printf("[%s] Failed to persist Qwen web state: %v\n", completionID, err)
+	}
+
+	content, toolCalls := utils.ParseToolCalls(result.Content)
+	toolCalls = finalizeToolCalls(toolCalls)
+	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
+	if len(toolCalls) > 0 {
+		content = ""
+		result.ReasoningText = ""
+		storePendingToolCalls(sessionHandle, toolCalls)
+	}
+	result.Content = content
+
+	if input.Stream {
+		writeDeepSeekStreamResponse(c, completionID, targetModel, result, responseCalls)
+		return
+	}
+	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result, responseCalls)
+	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
+	c.JSON(http.StatusOK, response)
+}
+
+func buildQwenPrompt(messages []models.Message, toolInstructions string) string {
+	if strings.TrimSpace(toolInstructions) == "" {
+		return buildDeepSeekPrompt(messages)
+	}
+	parts := []string{
+		"Tool instructions:\n" + strings.TrimSpace(toolInstructions),
+		"Qwen Web adapter rule: when an external action is needed, emit the matching <tool_call> block and wait for its result. Do not merely describe an action that still needs to be executed.",
+	}
+	if conversation := buildDeepSeekPrompt(messages); strings.TrimSpace(conversation) != "" {
+		parts = append(parts, conversation)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func qwenUnsentMessages(messages []models.Message, state services.WebChatState) []models.Message {
+	if state.ChatID == "" || state.ClientMessageCount <= 0 {
+		return messages
+	}
+	if state.ClientMessageCount < len(messages) {
+		pending := messages[state.ClientMessageCount:]
+		// The first newly appended assistant message is the response already stored
+		// by Qwen in this same upstream chat. Only the user/tool turns after it are new.
+		if len(pending) > 0 && pending[0].Role == "assistant" {
+			pending = pending[1:]
+		}
+		if len(pending) > 0 {
+			return pending
+		}
+	}
+	if len(messages) > 0 {
+		return messages[len(messages)-1:]
+	}
+	return nil
+}
+
+func buildQwenHandoff(messages []models.Message, toolInstructions, capsule string, rollover int) string {
+	transcript := buildQwenPrompt(messages, toolInstructions)
+	limit := services.QwenHandoffCharLimit()
+	if limit > 0 && len(transcript) > limit {
+		transcript = transcript[len(transcript)-limit:]
+		if newline := strings.Index(transcript, "\n"); newline >= 0 {
+			transcript = transcript[newline+1:]
+		}
+	}
+	capsuleSection := ""
+	if strings.TrimSpace(capsule) != "" {
+		capsuleSection = "\n\n--- CONTINUATION CAPSULE FROM THE PREVIOUS QWEN CHAT ---\n" + strings.TrimSpace(capsule) + "\n--- END CAPSULE ---"
+	}
+	return fmt.Sprintf("This is automatic continuation %d of the same working session. Treat the context below as the authoritative handoff, preserve unfinished work and continue from the latest turn. Do not restart or summarize unless asked.%s\n\n--- RECENT CLIENT CONTEXT ---\n%s\n--- END HANDOFF ---", rollover, capsuleSection, transcript)
+}
+
+func qwenChatTitle(messages []models.Message) string {
+	for _, message := range messages {
+		if message.Role != "user" {
+			continue
+		}
+		title := strings.Join(strings.Fields(services.ExtractText(message.Content, false)), " ")
+		if len(title) > 72 {
+			title = title[:72]
+		}
+		if title != "" {
+			return title
+		}
+	}
+	return "Sessão via flip-ai"
+}
+
+func qwenContinuationTitle(base string, rollover int) string {
+	suffix := fmt.Sprintf(" · Continuação %d", rollover)
+	if len(base)+len(suffix) > 96 {
+		base = base[:96-len(suffix)]
+	}
+	return base + suffix
 }
 
 func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {

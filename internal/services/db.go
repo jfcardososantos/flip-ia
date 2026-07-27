@@ -10,9 +10,9 @@ import (
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
+	"flip-ai/internal/models"
 	"fmt"
 	"log"
-	"flip-ai/internal/models"
 	"os"
 	"path/filepath"
 
@@ -65,6 +65,23 @@ func InitDB() {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TABLE IF NOT EXISTS web_chat_sessions (
+		provider TEXT NOT NULL,
+		session_key TEXT NOT NULL,
+		chat_id TEXT NOT NULL DEFAULT '',
+		parent_message_id TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL DEFAULT '',
+		rollover_count INTEGER NOT NULL DEFAULT 0,
+		estimated_tokens INTEGER NOT NULL DEFAULT 0,
+		client_message_count INTEGER NOT NULL DEFAULT 0,
+		last_message_hash TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY(provider, session_key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_web_chat_updated ON web_chat_sessions(provider, updated_at);
 	`
 	_, err = DB.Exec(createTableQuery)
 	if err != nil {
@@ -154,4 +171,73 @@ func GetAgentState(id string) (string, string, string, error) {
 	query := `SELECT goal, status, state_json FROM agent_states WHERE id = ?`
 	err := DB.QueryRow(query, id).Scan(&goal, &status, &stateJson)
 	return goal, status, stateJson, err
+}
+
+type WebChatState struct {
+	Provider           string
+	SessionKey         string
+	ChatID             string
+	ParentMessageID    string
+	Model              string
+	Title              string
+	RolloverCount      int
+	EstimatedTokens    int
+	ClientMessageCount int
+	LastMessageHash    string
+}
+
+func GetWebChatState(provider, sessionKey string) (WebChatState, error) {
+	if DB == nil {
+		return WebChatState{}, sql.ErrConnDone
+	}
+	var state WebChatState
+	query := `SELECT provider, session_key, chat_id, parent_message_id, model, title,
+		rollover_count, estimated_tokens, client_message_count, last_message_hash
+		FROM web_chat_sessions WHERE provider = ? AND session_key = ?`
+	err := DB.QueryRow(query, provider, sessionKey).Scan(
+		&state.Provider,
+		&state.SessionKey,
+		&state.ChatID,
+		&state.ParentMessageID,
+		&state.Model,
+		&state.Title,
+		&state.RolloverCount,
+		&state.EstimatedTokens,
+		&state.ClientMessageCount,
+		&state.LastMessageHash,
+	)
+	return state, err
+}
+
+func SaveWebChatState(state WebChatState) error {
+	if DB == nil || state.Provider == "" || state.SessionKey == "" {
+		return nil
+	}
+	query := `INSERT INTO web_chat_sessions (
+			provider, session_key, chat_id, parent_message_id, model, title,
+			rollover_count, estimated_tokens, client_message_count, last_message_hash, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(provider, session_key) DO UPDATE SET
+			chat_id = excluded.chat_id,
+			parent_message_id = excluded.parent_message_id,
+			model = excluded.model,
+			title = excluded.title,
+			rollover_count = excluded.rollover_count,
+			estimated_tokens = excluded.estimated_tokens,
+			client_message_count = excluded.client_message_count,
+			last_message_hash = excluded.last_message_hash,
+			updated_at = CURRENT_TIMESTAMP`
+	_, err := DB.Exec(query,
+		state.Provider,
+		state.SessionKey,
+		state.ChatID,
+		state.ParentMessageID,
+		state.Model,
+		state.Title,
+		state.RolloverCount,
+		state.EstimatedTokens,
+		state.ClientMessageCount,
+		state.LastMessageHash,
+	)
+	return err
 }

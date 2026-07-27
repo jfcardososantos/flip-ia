@@ -20,6 +20,7 @@ Os endpoints públicos não exigem token do cliente. A autenticação com a Xiao
 - Persistência de histórico em SQLite
 - Dashboard local para operação e teste
 - Extensão para importar sessões autenticadas suportadas
+- Qwen Web com conversa real persistida no `chat.qwen.ai`, continuidade por `chat_id` e rollover automático
 
 ## Como funciona a autenticação
 
@@ -86,6 +87,9 @@ Além dos modelos `mimo-*`, o endpoint `POST /v1/chat/completions` roteia automa
 | `groq/llama-3.1-8b-instant` | Groq | `GROQ_API_KEY` |
 | `kimi-k3` | Kimi Web (sessão do navegador) | importe a sessão Kimi pela extensão |
 | `kimi-k2.6` | Kimi Web (sessão do navegador) | importe a sessão Kimi pela extensão |
+| `qwen-web` | Qwen Web (`qwen3.7-plus`) | importe a sessão Qwen pela extensão |
+| `qwen-web/qwen3.7-plus` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
+| `qwen-web/qwen3.8-max-preview` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
 | `openrouter/meta-llama/llama-3.1-8b-instruct:free` | OpenRouter | `OPENROUTER_API_KEY` |
 | `cf/@cf/meta/llama-3.1-8b-instruct` | Cloudflare Workers AI | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID` |
 
@@ -286,7 +290,32 @@ Importa uma sessão web genérica por provedor. Payload típico:
 }
 ```
 
-Hoje o adapter web implementado é o `deepseek`. Os outros provedores podem ter a sessão armazenada desde já, mesmo antes do adapter HTTP correspondente existir.
+Os adapters web implementados são `deepseek`, `kimi` e `qwen`. No Qwen, o proxy cria uma conversa real na conta, persiste `chat_id` e `parent_message_id` no SQLite e envia somente os turnos novos. Ao atingir `QWEN_WEB_ROLLOVER_TOKENS`, ele abre automaticamente outra conversa com um handoff do contexto recente.
+
+Variáveis opcionais do Qwen:
+
+```env
+QWEN_WEB_DEFAULT_MODEL=qwen3.7-plus
+QWEN_WEB_ROLLOVER_TOKENS=850000
+QWEN_WEB_HANDOFF_CHARS=120000
+QWEN_WEB_THINKING=true
+QWEN_WEB_TIMEZONE=America/Bahia
+QWEN_WEB_VERSION=0.2.80
+```
+
+Como esse adapter usa a sessão web, mudanças do site ou verificações anti-bot podem exigir abrir o Qwen no Chrome e importar a sessão novamente.
+
+Para garantir que várias chamadas continuem exatamente no mesmo chat Qwen, envie um valor estável em `user`:
+
+```json
+{
+  "model": "qwen-web",
+  "user": "meu-projeto-estavel",
+  "messages": [{"role": "user", "content": "Continue o trabalho."}]
+}
+```
+
+Sem `user`, o proxy deriva a sessão da primeira mensagem do usuário.
 
 ## Integração com IDEs e clientes
 

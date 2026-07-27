@@ -42,3 +42,15 @@ func TestValidateGenericWebSessionAllowsCookieOnly(t *testing.T) {
 		t.Fatalf("unexpected cookie: %q", session.Cookie)
 	}
 }
+
+func TestValidateQwenWebSessionAcceptsCapturedToken(t *testing.T) {
+	session, err := ValidateWebSessionInput("qwen", StoredWebSession{
+		Storage: map[string]string{"token": "qwen-token"},
+	})
+	if err != nil {
+		t.Fatalf("validate qwen session: %v", err)
+	}
+	if session.Token != "qwen-token" {
+		t.Fatalf("expected qwen token to be normalized, got %q", session.Token)
+	}
+}

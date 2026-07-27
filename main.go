@@ -84,13 +84,23 @@ func maskValue(raw string) gin.H {
 	}
 
 	return gin.H{
-		"present":       trimmed != "",
-		"length":        len(trimmed),
-		"masked":        masked,
-		"hasSpaces":     strings.Contains(trimmed, " "),
-		"hasQuotes":     strings.ContainsAny(trimmed, `"'`),
-		"startsWith":    func() string { if len(trimmed) >= 4 { return trimmed[:4] }; return trimmed }(),
-		"endsWith":      func() string { if len(trimmed) >= 4 { return trimmed[len(trimmed)-4:] }; return trimmed }(),
+		"present":   trimmed != "",
+		"length":    len(trimmed),
+		"masked":    masked,
+		"hasSpaces": strings.Contains(trimmed, " "),
+		"hasQuotes": strings.ContainsAny(trimmed, `"'`),
+		"startsWith": func() string {
+			if len(trimmed) >= 4 {
+				return trimmed[:4]
+			}
+			return trimmed
+		}(),
+		"endsWith": func() string {
+			if len(trimmed) >= 4 {
+				return trimmed[len(trimmed)-4:]
+			}
+			return trimmed
+		}(),
 	}
 }
 
@@ -116,6 +126,7 @@ func mergeXiaomiAuth(existing services.StoredAuth, rawCookie string, token strin
 	stored.CloudflareAccountID = existing.CloudflareAccountID
 	stored.DefaultModel = existing.DefaultModel
 	stored.RequestAPIKey = existing.RequestAPIKey
+	stored.WebSessions = existing.WebSessions
 	return stored
 }
 
@@ -453,6 +464,17 @@ func providerRows(stored services.StoredAuth, storedErr error) []gin.H {
 		"Detail":     errString(kimiErr),
 	})
 
+	_, qwenErr := services.GetSelectedQwenSession()
+	qwenConfigured := qwenErr == nil
+	rows = append(rows, gin.H{
+		"Name":       "Qwen Web",
+		"Key":        "qwen",
+		"Configured": qwenConfigured,
+		"Source":     sourceWhenConfigured(qwenConfigured, "data/auth.json"),
+		"Status":     statusLabel(qwenConfigured),
+		"Detail":     errString(qwenErr),
+	})
+
 	_, deepSeekErr := services.GetSelectedDeepSeekAuth()
 	deepSeekConfigured := deepSeekErr == nil
 	rows = append(rows, gin.H{
@@ -500,6 +522,15 @@ func availableModelRows() []gin.H {
 	if _, _, err := services.GetSelectedKimiSession(); err == nil {
 		rows = append(rows, gin.H{"ID": "kimi-k3", "Provider": "Kimi Web", "Description": "Kimi K3 via sessão do navegador"})
 		rows = append(rows, gin.H{"ID": "kimi-k2.6", "Provider": "Kimi Web", "Description": "Kimi K2.6 via sessão do navegador"})
+	}
+	if _, err := services.GetSelectedQwenSession(); err == nil {
+		rows = append(rows,
+			gin.H{"ID": "qwen-web", "Provider": "Qwen Web", "Description": "Qwen 3.7 Plus, conversa persistente com contexto de 1M"},
+			gin.H{"ID": "qwen-web/qwen3.7-plus", "Provider": "Qwen Web", "Description": "Qwen 3.7 Plus, contexto de 1M"},
+			gin.H{"ID": "qwen-web/qwen3.8-max-preview", "Provider": "Qwen Web", "Description": "Qwen 3.8 Max Preview, contexto de 1M"},
+			gin.H{"ID": "qwen-web/qwen3.7-max", "Provider": "Qwen Web", "Description": "Qwen 3.7 Max, contexto de 1M"},
+			gin.H{"ID": "qwen-web/qwen3.6-plus", "Provider": "Qwen Web", "Description": "Qwen 3.6 Plus, contexto de 1M"},
+		)
 	}
 	for _, model := range services.OfficialProviderModels() {
 		id, _ := model["id"].(string)
@@ -627,19 +658,19 @@ func renderDashboard(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "dashboard.html", gin.H{
-		"ProductName":     "flip-ai",
-		"Status":          status,
-		"Uptime":          fmt.Sprintf("%.0f", time.Since(startTime).Seconds()),
-		"Usage":           usage,
-		"ProviderUsage":   providerUsage,
-		"Models":          modelRows,
-		"Providers":       providers,
-		"AuthStore":       services.AuthStorePathForDisplay(),
-		"StoredError":     errString(storedAuthErr),
-		"SettingsEnabled": settingsPassword() != "",
-		"DefaultModel":    services.ConfiguredDefaultModel(),
-		"DefaultSource":   defaultModelSource(storedAuth),
-		"RequestAuth":     services.RequestAuthEnabled(),
+		"ProductName":      "flip-ai",
+		"Status":           status,
+		"Uptime":           fmt.Sprintf("%.0f", time.Since(startTime).Seconds()),
+		"Usage":            usage,
+		"ProviderUsage":    providerUsage,
+		"Models":           modelRows,
+		"Providers":        providers,
+		"AuthStore":        services.AuthStorePathForDisplay(),
+		"StoredError":      errString(storedAuthErr),
+		"SettingsEnabled":  settingsPassword() != "",
+		"DefaultModel":     services.ConfiguredDefaultModel(),
+		"DefaultSource":    defaultModelSource(storedAuth),
+		"RequestAuth":      services.RequestAuthEnabled(),
 		"RequestKeySource": requestAPIKeySource(storedAuth),
 	})
 }
@@ -754,12 +785,12 @@ func inferenceAuthMiddleware() gin.HandlerFunc {
 
 func main() {
 	_ = godotenv.Load()
-	
+
 	// Initialize local database
 	services.InitDB()
 
 	r := gin.New()
-	
+
 	// Set up templates
 	r.SetFuncMap(template.FuncMap{
 		"safe": func(s string) template.HTML {
@@ -999,7 +1030,7 @@ func main() {
 			"deepseekConfigured":      stored.DeepSeekCookie != "" && stored.DeepSeekToken != "",
 			"storedHasDeepSeekCookie": stored.DeepSeekCookie != "",
 			"storedHasDeepSeekToken":  stored.DeepSeekToken != "",
-			"webSessions":            maskedWebSessions(stored),
+			"webSessions":             maskedWebSessions(stored),
 			"defaultModel":            services.ConfiguredDefaultModel(),
 			"defaultModelSource":      defaultModelSource(stored),
 			"requestAuthEnabled":      services.RequestAuthEnabled(),
@@ -1040,13 +1071,13 @@ func main() {
 			"authError":  errString(authErr),
 			"authSource": detectAuthSource(stored, storedErr),
 			"stored": gin.H{
-				"loadError":         errString(storedErr),
-				"XIAOMI_COOKIE":     maskValue(stored.XiaomiCookie),
-				"SERVICE_TOKEN":     maskValue(stored.ServiceToken),
-				"USER_ID":           maskValue(stored.UserID),
-				"XIAOMI_CHATBOT_PH": maskValue(stored.XiaomiChatbot),
-				"DEEPSEEK_COOKIE":   maskValue(stored.DeepSeekCookie),
-				"DEEPSEEK_TOKEN":    maskValue(stored.DeepSeekToken),
+				"loadError":               errString(storedErr),
+				"XIAOMI_COOKIE":           maskValue(stored.XiaomiCookie),
+				"SERVICE_TOKEN":           maskValue(stored.ServiceToken),
+				"USER_ID":                 maskValue(stored.UserID),
+				"XIAOMI_CHATBOT_PH":       maskValue(stored.XiaomiChatbot),
+				"DEEPSEEK_COOKIE":         maskValue(stored.DeepSeekCookie),
+				"DEEPSEEK_TOKEN":          maskValue(stored.DeepSeekToken),
 				"GEMINI_API_KEY":          maskValue(stored.GeminiAPIKey),
 				"GROQ_API_KEY":            maskValue(stored.GroqAPIKey),
 				"OPENROUTER_API_KEY":      maskValue(stored.OpenRouterAPIKey),
@@ -1059,9 +1090,9 @@ func main() {
 			},
 			"webSessions": maskedWebSessions(stored),
 			"selectedAuth": gin.H{
-				"token": maskValue(auth.Token),
+				"token":  maskValue(auth.Token),
 				"userID": maskValue(auth.UserID),
-				"ph":    maskValue(auth.Ph),
+				"ph":     maskValue(auth.Ph),
 			},
 		})
 	})
@@ -1257,17 +1288,17 @@ func main() {
 		}
 
 		var payload struct {
-			Provider   string            `json:"provider" form:"provider"`
-			RawCookie  string            `json:"raw_cookie" form:"raw_cookie"`
-			Token      string            `json:"token" form:"token"`
-			UserAgent  string            `json:"user_agent" form:"user_agent"`
-			Origin     string            `json:"origin" form:"origin"`
-			Referer    string            `json:"referer" form:"referer"`
-			Headers    map[string]string `json:"headers"`
-			Storage    map[string]string `json:"storage"`
-			HeadersJSON string           `json:"headers_json" form:"headers_json"`
-			StorageJSON string           `json:"storage_json" form:"storage_json"`
-			Source     string            `json:"source" form:"source"`
+			Provider    string            `json:"provider" form:"provider"`
+			RawCookie   string            `json:"raw_cookie" form:"raw_cookie"`
+			Token       string            `json:"token" form:"token"`
+			UserAgent   string            `json:"user_agent" form:"user_agent"`
+			Origin      string            `json:"origin" form:"origin"`
+			Referer     string            `json:"referer" form:"referer"`
+			Headers     map[string]string `json:"headers"`
+			Storage     map[string]string `json:"storage"`
+			HeadersJSON string            `json:"headers_json" form:"headers_json"`
+			StorageJSON string            `json:"storage_json" form:"storage_json"`
+			Source      string            `json:"source" form:"source"`
 		}
 
 		if strings.Contains(c.GetHeader("Content-Type"), "application/json") {
@@ -1322,10 +1353,17 @@ func main() {
 			return
 		}
 
+		implemented := false
+		for _, definition := range services.WebProviderDefinitions() {
+			if definition.ID == session.Provider {
+				implemented = definition.Implemented
+				break
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"saved":         true,
 			"provider":      session.Provider,
-			"implemented":   session.Provider == "deepseek",
+			"implemented":   implemented,
 			"authSource":    "data/auth.json",
 			"storePath":     services.AuthStorePathForDisplay(),
 			"importedFrom":  session.Source,

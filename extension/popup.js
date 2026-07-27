@@ -5,9 +5,11 @@ const saveConfigButton = document.getElementById("saveConfig");
 const importButton = document.getElementById("importSession");
 const importDeepSeekButton = document.getElementById("importDeepSeekSession");
 const importKimiButton = document.getElementById("importKimiSession");
+const importQwenButton = document.getElementById("importQwenSession");
 const openXiaomiButton = document.getElementById("openXiaomi");
 const openDeepSeekButton = document.getElementById("openDeepSeek");
 const openKimiButton = document.getElementById("openKimi");
+const openQwenButton = document.getElementById("openQwen");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const groqApiKeyInput = document.getElementById("groqApiKey");
 const openRouterApiKeyInput = document.getElementById("openRouterApiKey");
@@ -27,6 +29,7 @@ const saveCloudflareButton = document.getElementById("saveCloudflare");
 const XIAOMI_STUDIO_URL = "https://aistudio.xiaomimimo.com/";
 const DEEPSEEK_CHAT_URL = "https://chat.deepseek.com/";
 const KIMI_CHAT_URL = "https://www.kimi.com/";
+const QWEN_CHAT_URL = "https://chat.qwen.ai/";
 const GEMINI_KEYS_URL = "https://aistudio.google.com/app/apikey";
 const GROQ_KEYS_URL = "https://console.groq.com/keys";
 const OPENROUTER_KEYS_URL = "https://openrouter.ai/settings/keys";
@@ -42,6 +45,12 @@ const DEEPSEEK_COOKIE_URLS = [
   "https://deepseek.com/"
 ];
 const KIMI_COOKIE_URLS = ["https://www.kimi.com/", "https://kimi.com/"];
+const QWEN_COOKIE_URLS = [
+  "https://chat.qwen.ai/",
+  "https://qwen.ai/",
+  "https://chat.qwenlm.ai/",
+  "https://qwenlm.ai/"
+];
 
 function setStatus(message) {
   statusOutput.value = message;
@@ -148,6 +157,21 @@ async function collectKimiRawCookieJar() {
   return Array.from(seen.entries()).map(([name, value]) => `${name}=${value}`).join("; ");
 }
 
+async function collectQwenRawCookieJar() {
+  const seen = new Map();
+  for (const url of QWEN_COOKIE_URLS) {
+    for (const cookie of await chrome.cookies.getAll({ url })) {
+      if (cookie && cookie.name) seen.set(cookie.name, cookie.value);
+    }
+  }
+  const fallbackCookies = await chrome.cookies.getAll({});
+  for (const cookie of fallbackCookies) {
+    if (!cookie || !cookie.name || (!cookie.domain.includes("qwen.ai") && !cookie.domain.includes("qwenlm.ai"))) continue;
+    if (!seen.has(cookie.name)) seen.set(cookie.name, cookie.value);
+  }
+  return Array.from(seen.entries()).map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
 async function getKimiAccessToken() {
   const tabs = await chrome.tabs.query({ url: "https://www.kimi.com/*" });
   const tab = tabs.find((item) => item.id);
@@ -193,6 +217,39 @@ async function getDeepSeekUserToken() {
     throw new Error("Não encontrei localStorage.userToken na aba do DeepSeek.");
   }
   return token;
+}
+
+async function getQwenBrowserSession() {
+  const patterns = [
+    "https://chat.qwen.ai/*",
+    "https://chat.qwenlm.ai/*"
+  ];
+  let tabs = [];
+  for (const pattern of patterns) {
+    tabs = tabs.concat(await chrome.tabs.query({ url: pattern }));
+  }
+  const tab = tabs.find((item) => item.id);
+  if (!tab) {
+    throw new Error("Abra https://chat.qwen.ai logado antes de importar.");
+  }
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => ({
+      token: localStorage.getItem("token") || localStorage.getItem("qwen_token") || "",
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      language: navigator.language || "",
+      userAgent: navigator.userAgent || "",
+      origin: location.origin
+    })
+  });
+  const captured = result && result.result || {};
+  return {
+    token: String(captured.token || "").trim(),
+    timezone: String(captured.timezone || "").trim(),
+    language: String(captured.language || "").trim(),
+    userAgent: String(captured.userAgent || navigator.userAgent || "").trim(),
+    origin: String(captured.origin || "https://chat.qwen.ai").trim()
+  };
 }
 
 async function collectSession() {
@@ -300,7 +357,7 @@ async function importDeepSeekSession() {
       body: JSON.stringify({
         provider: "deepseek",
         token: userToken,
-        rawCookie,
+        raw_cookie: rawCookie,
         user_agent: navigator.userAgent,
         storage: {
           userToken
@@ -331,12 +388,55 @@ async function importKimiSession() {
     const [rawCookie, accessToken] = await Promise.all([collectKimiRawCookieJar(), getKimiAccessToken()]);
     const response = await fetch(`${proxyUrl}/auth/web/import`, {
       method: "POST", headers: providerHeaders(),
-      body: JSON.stringify({ provider: "kimi", token: accessToken, rawCookie, user_agent: navigator.userAgent, storage: { access_token: accessToken }, source: "chrome-extension" })
+      body: JSON.stringify({ provider: "kimi", token: accessToken, raw_cookie: rawCookie, user_agent: navigator.userAgent, storage: { access_token: accessToken }, source: "chrome-extension" })
     });
     const bodyText = await response.text();
     setStatus(`HTTP ${response.status} ${response.statusText}\n\n${bodyText}`);
   } catch (error) {
     setStatus(`Falha ao importar a sessão Kimi.\n\n${error.message || String(error)}`);
+  }
+}
+
+async function importQwenSession() {
+  const proxyUrl = normalizeProxyUrl(proxyUrlInput.value);
+  if (!proxyUrl) {
+    setStatus("Informe a URL do proxy antes de importar.");
+    return;
+  }
+  setStatus("Lendo cookies, token e dados da aba do Qwen...");
+  try {
+    const [rawCookie, browserSession] = await Promise.all([
+      collectQwenRawCookieJar(),
+      getQwenBrowserSession()
+    ]);
+    if (!rawCookie && !browserSession.token) {
+      throw new Error("Não encontrei cookies nem token de uma sessão Qwen autenticada.");
+    }
+    const sessionHeaders = {};
+    if (browserSession.timezone) sessionHeaders.Timezone = browserSession.timezone;
+    if (browserSession.language) sessionHeaders["Accept-Language"] = browserSession.language;
+
+    const response = await fetch(`${proxyUrl}/auth/web/import`, {
+      method: "POST",
+      headers: providerHeaders(),
+      body: JSON.stringify({
+        provider: "qwen",
+        token: browserSession.token,
+        raw_cookie: rawCookie,
+        user_agent: browserSession.userAgent,
+        origin: browserSession.origin,
+        referer: `${browserSession.origin}/`,
+        headers: sessionHeaders,
+        storage: {
+          token: browserSession.token
+        },
+        source: "chrome-extension"
+      })
+    });
+    const bodyText = await response.text();
+    setStatus(`HTTP ${response.status} ${response.statusText}\n\n${bodyText}`);
+  } catch (error) {
+    setStatus(`Falha ao importar a sessão Qwen.\n\n${error.message || String(error)}`);
   }
 }
 
@@ -398,6 +498,10 @@ importKimiButton.addEventListener("click", async () => {
   await saveConfig();
   await importKimiSession();
 });
+importQwenButton.addEventListener("click", async () => {
+  await saveConfig();
+  await importQwenSession();
+});
 openXiaomiButton.addEventListener("click", () => {
   chrome.tabs.create({ url: XIAOMI_STUDIO_URL });
 });
@@ -406,6 +510,9 @@ openDeepSeekButton.addEventListener("click", () => {
 });
 openKimiButton.addEventListener("click", () => {
   chrome.tabs.create({ url: KIMI_CHAT_URL });
+});
+openQwenButton.addEventListener("click", () => {
+  chrome.tabs.create({ url: QWEN_CHAT_URL });
 });
 openGeminiButton.addEventListener("click", () => {
   chrome.tabs.create({ url: GEMINI_KEYS_URL });

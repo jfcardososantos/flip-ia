@@ -148,7 +148,7 @@ func deepSeekPowWASMPath() (string, error) {
 func errorsWithOutput(message string, output []byte) error {
 	details := strings.TrimSpace(string(output))
 	if details == "" {
-		return fmt.Errorf(message)
+		return fmt.Errorf("%s", message)
 	}
 	return fmt.Errorf("%s: %s", message, details)
 }

@@ -48,6 +48,13 @@ func WebProviderDefinitions() []WebProviderDefinition {
 			Implemented: true,
 		},
 		{
+			ID:          "qwen",
+			Name:        "Qwen Web",
+			LoginURL:    "https://chat.qwen.ai/",
+			Description: "Adapter web persistente: as conversas aparecem no Qwen e fazem rollover automático.",
+			Implemented: true,
+		},
+		{
 			ID:          "gemini-web",
 			Name:        "Gemini Web",
 			LoginURL:    "https://gemini.google.com/",
@@ -150,6 +157,12 @@ func WebSessionToken(session StoredWebSession) string {
 	if token := strings.TrimSpace(session.Storage["access_token"]); token != "" {
 		return token
 	}
+	if token := strings.TrimSpace(session.Storage["token"]); token != "" {
+		return token
+	}
+	if token := strings.TrimSpace(session.Storage["qwen_token"]); token != "" {
+		return token
+	}
 	if authHeader := strings.TrimSpace(session.Headers["authorization"]); strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 		return strings.TrimSpace(authHeader[7:])
 	}
@@ -190,6 +203,11 @@ func ValidateWebSessionInput(provider string, session StoredWebSession) (StoredW
 		if WebSessionToken(session) == "" && kimiTokenFromCookie(session.Cookie) == "" {
 			return StoredWebSession{}, errors.New("missing Kimi access_token from localStorage or kimi-auth cookie")
 		}
+	case "qwen":
+		if WebSessionToken(session) == "" && session.Cookie == "" {
+			return StoredWebSession{}, errors.New("missing Qwen token from localStorage/cookie or raw cookie jar")
+		}
+		session.Token = WebSessionToken(session)
 	default:
 		if session.Cookie == "" {
 			return StoredWebSession{}, errors.New("missing raw cookie jar")

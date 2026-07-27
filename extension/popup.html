@@ -85,7 +85,7 @@
   </head>
   <body>
     <h1>flip-ai Importer</h1>
-    <p class="hint">Xiaomi, DeepSeek e Kimi usam sessão do navegador. Gemini, Groq, OpenRouter e Cloudflare usam API keys oficiais.</p>
+    <p class="hint">Xiaomi, DeepSeek, Kimi e Qwen usam sessão do navegador. Gemini, Groq, OpenRouter e Cloudflare usam API keys oficiais.</p>
 
     <label for="proxyUrl">Proxy URL</label>
     <input id="proxyUrl" type="url" placeholder="https://seu-proxy.exemplo.com">
@@ -96,13 +96,15 @@
     <div class="row">
       <button id="openXiaomi" type="button" class="secondary">Open Xiaomi</button>
       <button id="openDeepSeek" type="button" class="secondary">Open DeepSeek</button>
-	  <button id="openKimi" type="button" class="secondary">Open Kimi</button>
+      <button id="openKimi" type="button" class="secondary">Open Kimi</button>
+      <button id="openQwen" type="button" class="secondary">Open Qwen</button>
     </div>
 
     <div class="row">
       <button id="saveConfig" type="button" class="secondary">Save Config</button>
       <button id="importDeepSeekSession" type="button">Import DeepSeek</button>
-	  <button id="importKimiSession" type="button">Import Kimi</button>
+      <button id="importKimiSession" type="button">Import Kimi</button>
+      <button id="importQwenSession" type="button">Import Qwen</button>
     </div>
 
     <button id="importSession" type="button">Import Xiaomi Session</button>

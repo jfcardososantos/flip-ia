@@ -16,7 +16,7 @@ func TestParseKimiConnectStream(t *testing.T) {
 		return result
 	}
 	raw := append(frame(0, map[string]interface{}{"op": "set", "mask": "block.think", "block": map[string]interface{}{"think": map[string]string{"content": "raciocinio"}}}), frame(0, map[string]interface{}{"op": "append", "mask": "block.text.content", "block": map[string]interface{}{"text": map[string]string{"content": "resposta"}}})...)
-	raw = append(raw, frame(2, map[string]interface{})...)
+	raw = append(raw, frame(2, map[string]interface{}{})...)
 
 	result, err := parseKimiConnectStream(raw)
 	if err != nil {

@@ -133,59 +133,14 @@ func RegisterChatRoutes(r *gin.Engine, authMiddleware gin.HandlerFunc) {
 }
 
 func handleModels(c *gin.Context) {
-	auth, err := services.GetSelectedAuth()
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"object": "list", "data": appendDeepSeekModels([]map[string]interface{}{})})
-		return
-	}
-
 	if cached, found := services.GlobalCache.Get("models_list"); found {
 		c.JSON(http.StatusOK, cached)
 		return
 	}
-
-	headers := services.GetOfficialHeaders(auth, nil)
-	req, _ := http.NewRequest("GET", "https://aistudio.xiaomimimo.com/open-apis/bot/config", nil)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := services.GlobalHTTPClient.Do(req)
-	if err == nil {
-		defer resp.Body.Close()
-	}
-	if err == nil && resp.StatusCode == http.StatusOK {
-		var result struct {
-			Code int `json:"code"`
-			Data struct {
-				ModelConfigList []struct {
-					Model   string `json:"model"`
-					EnIntro string `json:"enIntro"`
-				} `json:"modelConfigList"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Code == 0 {
-			modelsList := make([]map[string]interface{}, 0)
-			for _, m := range result.Data.ModelConfigList {
-				modelsList = append(modelsList, map[string]interface{}{
-					"id":          m.Model,
-					"object":      "model",
-					"created":     1700000000,
-					"owned_by":    "xiaomi",
-					"description": m.EnIntro,
-				})
-			}
-			modelsList = appendDeepSeekModels(modelsList)
-			response := gin.H{"object": "list", "data": modelsList}
-			services.GlobalCache.Set("models_list", response, 30*time.Minute)
-			c.JSON(http.StatusOK, response)
-			return
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"object": "list", "data": appendDeepSeekModels([]map[string]interface{}{
-		{"id": "mimo-v2.5-pro", "object": "model", "created": 1700000000, "owned_by": "xiaomi"},
-	})})
+	modelsList := appendDeepSeekModels(services.XiaomiCatalogModels())
+	response := gin.H{"object": "list", "data": modelsList}
+	services.GlobalCache.Set("models_list", response, 30*time.Minute)
+	c.JSON(http.StatusOK, response)
 }
 
 func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]interface{} {
@@ -197,6 +152,7 @@ func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]inte
 		"description": "Alias resolved by flip-ai DEFAULT_MODEL/defaultModel",
 	})
 	modelsList = append(modelsList, services.OfficialProviderModels()...)
+	modelsList = append(modelsList, services.QwenWebModels()...)
 	modelsList = append(modelsList,
 		map[string]interface{}{
 			"id":          "deepseek-chat",
@@ -226,26 +182,6 @@ func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]inte
 		map[string]interface{}{
 			"id": "kimi-k2.6", "object": "model", "created": 1752969600, "owned_by": "moonshot",
 			"description": "Kimi K2.6 web chat session",
-		},
-		map[string]interface{}{
-			"id": "qwen-web", "object": "model", "created": 1785110400, "owned_by": "qwen",
-			"description": "Qwen Web persistent chat (qwen3.7-plus, 1M context)",
-		},
-		map[string]interface{}{
-			"id": "qwen-web/qwen3.7-plus", "object": "model", "created": 1785110400, "owned_by": "qwen",
-			"description": "Qwen 3.7 Plus Web persistent chat (1M context)",
-		},
-		map[string]interface{}{
-			"id": "qwen-web/qwen3.8-max-preview", "object": "model", "created": 1785110400, "owned_by": "qwen",
-			"description": "Qwen 3.8 Max Preview Web persistent chat (1M context)",
-		},
-		map[string]interface{}{
-			"id": "qwen-web/qwen3.7-max", "object": "model", "created": 1785110400, "owned_by": "qwen",
-			"description": "Qwen 3.7 Max Web persistent chat (1M context)",
-		},
-		map[string]interface{}{
-			"id": "qwen-web/qwen3.6-plus", "object": "model", "created": 1785110400, "owned_by": "qwen",
-			"description": "Qwen 3.6 Plus Web persistent chat (1M context)",
 		},
 	)
 	return modelsList

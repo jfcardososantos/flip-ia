@@ -9,10 +9,12 @@ import (
 )
 
 func TestResolveQwenWebModel(t *testing.T) {
+	t.Setenv("QWEN_WEB_DEFAULT_MODEL", "")
 	tests := map[string]string{
 		"qwen-web":                     "qwen3.7-plus",
 		"qwen-web/qwen3.7-plus":        "qwen3.7-plus",
 		"qwen-web/qwen3.8-max-preview": "qwen3.8-max-preview",
+		"qwen-web/qwen-future":         "qwen-future",
 	}
 	for input, want := range tests {
 		got, ok := ResolveQwenWebModel(input)

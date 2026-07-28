@@ -507,10 +507,13 @@ func availableModelRows() []gin.H {
 		{"ID": "default", "Provider": "flip-ai", "Description": "Alias para " + services.ConfiguredDefaultModel()},
 	}
 	if _, err := services.GetSelectedAuth(); err == nil {
-		rows = append(rows,
-			gin.H{"ID": "mimo-v2.5-pro", "Provider": "Xiaomi Mimo", "Description": "Modelo principal Mimo"},
-			gin.H{"ID": "mimo-v2.5-pro-no-thinking", "Provider": "Xiaomi Mimo", "Description": "Mimo sem reasoning para agentes"},
-		)
+		for _, model := range services.XiaomiCatalogModels() {
+			id, _ := model["id"].(string)
+			description, _ := model["description"].(string)
+			if id != "" {
+				rows = append(rows, gin.H{"ID": id, "Provider": "Xiaomi Mimo", "Description": description})
+			}
+		}
 	}
 	if _, err := services.GetSelectedDeepSeekAuth(); err == nil {
 		rows = append(rows,
@@ -524,13 +527,13 @@ func availableModelRows() []gin.H {
 		rows = append(rows, gin.H{"ID": "kimi-k2.6", "Provider": "Kimi Web", "Description": "Kimi K2.6 via sessão do navegador"})
 	}
 	if _, err := services.GetSelectedQwenSession(); err == nil {
-		rows = append(rows,
-			gin.H{"ID": "qwen-web", "Provider": "Qwen Web", "Description": "Qwen 3.7 Plus, conversa persistente com contexto de 1M"},
-			gin.H{"ID": "qwen-web/qwen3.7-plus", "Provider": "Qwen Web", "Description": "Qwen 3.7 Plus, contexto de 1M"},
-			gin.H{"ID": "qwen-web/qwen3.8-max-preview", "Provider": "Qwen Web", "Description": "Qwen 3.8 Max Preview, contexto de 1M"},
-			gin.H{"ID": "qwen-web/qwen3.7-max", "Provider": "Qwen Web", "Description": "Qwen 3.7 Max, contexto de 1M"},
-			gin.H{"ID": "qwen-web/qwen3.6-plus", "Provider": "Qwen Web", "Description": "Qwen 3.6 Plus, contexto de 1M"},
-		)
+		for _, model := range services.QwenWebModels() {
+			id, _ := model["id"].(string)
+			description, _ := model["description"].(string)
+			if id != "" {
+				rows = append(rows, gin.H{"ID": id, "Provider": "Qwen Web", "Description": description})
+			}
+		}
 	}
 	for _, model := range services.OfficialProviderModels() {
 		id, _ := model["id"].(string)
@@ -788,6 +791,10 @@ func main() {
 
 	// Initialize local database
 	services.InitDB()
+	modelCatalogContext, stopModelCatalog := context.WithCancel(context.Background())
+	defer stopModelCatalog()
+	services.InitializeModelCatalog(modelCatalogContext)
+	services.StartModelCatalogAutoRefresh(modelCatalogContext)
 
 	r := gin.New()
 
@@ -1127,6 +1134,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist extension session", "details": err.Error()})
 			return
 		}
+		services.RefreshModelCatalogInBackground()
 
 		c.JSON(http.StatusOK, gin.H{
 			"saved":         true,
@@ -1175,6 +1183,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist credentials", "details": err.Error()})
 			return
 		}
+		services.RefreshModelCatalogInBackground()
 
 		c.JSON(http.StatusOK, gin.H{
 			"saved":      true,
@@ -1352,6 +1361,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist web session", "details": err.Error()})
 			return
 		}
+		services.RefreshModelCatalogInBackground()
 
 		implemented := false
 		for _, definition := range services.WebProviderDefinitions() {
@@ -1421,6 +1431,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist provider credentials", "details": err.Error()})
 			return
 		}
+		services.RefreshModelCatalogInBackground()
 
 		c.JSON(http.StatusOK, gin.H{
 			"saved":      true,
@@ -1458,6 +1469,27 @@ func main() {
 		})
 	})
 
+	r.GET("/auth/models/catalog", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		c.JSON(http.StatusOK, services.CurrentModelCatalog())
+	})
+
+	r.POST("/auth/models/refresh", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		refreshContext, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+		defer cancel()
+		err := services.RefreshModelCatalog(refreshContext)
+		c.JSON(http.StatusOK, gin.H{
+			"refreshed": err == nil,
+			"error":     errString(err),
+			"catalog":   services.CurrentModelCatalog(),
+		})
+	})
+
 	// Mount chat routes
 	routes.RegisterChatRoutes(r, inferenceAuthMiddleware())
 	port := os.Getenv("PORT")
@@ -1489,6 +1521,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	log.Printf("Shutdown Server ... signal=%s", sig.String())
+	stopModelCatalog()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

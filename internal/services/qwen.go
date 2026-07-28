@@ -37,14 +37,22 @@ func IsQwenWebModel(model string) bool {
 
 func ResolveQwenWebModel(model string) (string, bool) {
 	model = strings.ToLower(strings.TrimSpace(model))
-	switch model {
-	case "qwen-web":
-		return qwenEnvOrDefault("QWEN_WEB_DEFAULT_MODEL", "qwen3.7-plus"), true
-	case "qwen-web/qwen3.7-plus", "qwen-web/qwen3.7-max", "qwen-web/qwen3.8-max-preview", "qwen-web/qwen3.6-plus":
-		return strings.TrimPrefix(model, "qwen-web/"), true
-	default:
-		return "", false
+	if model == "qwen-web" {
+		if configured := strings.TrimSpace(os.Getenv("QWEN_WEB_DEFAULT_MODEL")); configured != "" {
+			return configured, true
+		}
+		if current := strings.TrimSpace(CurrentModelCatalog().Providers["qwen"].DefaultModel); current != "" {
+			return current, true
+		}
+		return "qwen3.7-plus", true
 	}
+	if strings.HasPrefix(model, "qwen-web/") {
+		upstream := strings.TrimSpace(strings.TrimPrefix(model, "qwen-web/"))
+		if upstream != "" && !strings.ContainsAny(upstream, " \t\r\n?#") {
+			return upstream, true
+		}
+	}
+	return "", false
 }
 
 func GetSelectedQwenSession() (StoredWebSession, error) {

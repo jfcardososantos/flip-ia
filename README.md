@@ -21,6 +21,7 @@ Os endpoints públicos não exigem token do cliente. A autenticação com a Xiao
 - Dashboard local para operação e teste
 - Extensão para importar sessões autenticadas suportadas
 - Qwen Web com conversa real persistida no `chat.qwen.ai`, continuidade por `chat_id` e rollover automático
+- Catálogo de modelos atualizado automaticamente no boot e em intervalos configuráveis
 
 ## Como funciona a autenticação
 
@@ -64,6 +65,9 @@ GROQ_API_KEY=
 OPENROUTER_API_KEY=
 CLOUDFLARE_API_KEY=
 CLOUDFLARE_ACCOUNT_ID=
+MODEL_CATALOG_REFRESH_ON_STARTUP=true
+MODEL_CATALOG_REFRESH_INTERVAL=6h
+MODEL_CATALOG_TIMEOUT_SECONDS=15
 ```
 
 Notas:
@@ -76,6 +80,27 @@ Notas:
 - `AUTH_STORE_PATH` é opcional. Se não for definido, a sessão fica em `data/auth.json`.
 - As chaves Gemini/Groq/OpenRouter/Cloudflare são opcionais. Se não forem definidas, o Mimo continua funcionando normalmente e os modelos daquele provider retornam erro de configuração.
 - Essas chaves podem vir do ambiente ou ser salvas em `data/auth.json` pela extensão em `POST /auth/provider/import`.
+- `MODEL_CATALOG_REFRESH_INTERVAL=0` desativa apenas a atualização periódica. O refresh no boot continua controlado separadamente por `MODEL_CATALOG_REFRESH_ON_STARTUP`.
+
+## Catálogo automático de modelos
+
+Ao iniciar, o proxy carrega o último catálogo salvo e consulta em paralelo as listas atuais da Qwen, Xiaomi, Gemini, Groq, OpenRouter e Cloudflare. Providers que precisam de credenciais só são consultados quando estão configurados. O OpenRouter é público e, por padrão, o catálogo mantém somente os modelos gratuitos.
+
+O resultado é salvo em `data/model_catalog.json` (ou em `MODEL_CATALOG_PATH`), reaproveitado quando um provider estiver indisponível e atualizado novamente a cada seis horas. Quando uma chave ou sessão é importada pelo dashboard/extensão, um novo refresh é disparado em segundo plano.
+
+Os IDs recebem os prefixos esperados pelo roteador (`groq/`, `openrouter/`, `cf/` e `qwen-web/`). O alias `qwen-web` acompanha automaticamente o modelo principal ativo informado pela Qwen, salvo se `QWEN_WEB_DEFAULT_MODEL` estiver definido.
+
+Variáveis opcionais:
+
+```env
+MODEL_CATALOG_REFRESH_ON_STARTUP=true
+MODEL_CATALOG_REFRESH_INTERVAL=6h
+MODEL_CATALOG_TIMEOUT_SECONDS=15
+MODEL_CATALOG_PATH=
+OPENROUTER_FREE_MODELS_ONLY=true
+```
+
+Os aliases especiais de DeepSeek e Kimi continuam controlados pelo proxy, porque representam modos do adapter web, e não uma simples lista de modelos de API.
 
 ## Providers oficiais
 
@@ -212,7 +237,7 @@ Endpoint legado. O proxy converte `prompt` internamente para chat.
 
 #### `GET /v1/models`
 
-Lista os modelos visíveis pela sessão autenticada na Xiaomi.
+Lista o catálogo combinado mais recente dos providers e os aliases dos adapters web.
 
 ### Ollama
 
@@ -271,6 +296,14 @@ Permite importar a sessão manualmente por payload, se você realmente precisar 
 #### `POST /auth/extension/import`
 
 Endpoint usado pela extensão.
+
+#### `GET /auth/models/catalog`
+
+Mostra o snapshot atual, a origem, a última atualização e eventuais erros por provider.
+
+#### `POST /auth/models/refresh`
+
+Força imediatamente uma nova descoberta de modelos. A rota mantém o último catálogo válido de cada provider quando uma fonte estiver temporariamente indisponível.
 
 #### `POST /auth/web/import`
 

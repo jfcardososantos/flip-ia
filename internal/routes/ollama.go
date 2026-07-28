@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"compress/gzip"
 	"encoding/json"
-	"fmt"
-	"io"
 	"flip-ai/internal/models"
 	"flip-ai/internal/services"
 	"flip-ai/internal/utils"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -59,45 +59,13 @@ func handleOllamaTags(c *gin.Context) {
 		id, _ := model["id"].(string)
 		addModel(id, ollamaFamilyForModel(id))
 	}
-
-	auth, err := services.GetSelectedAuth()
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"models": modelsList})
-		return
+	for _, model := range services.XiaomiCatalogModels() {
+		id, _ := model["id"].(string)
+		addModel(id, "mimo")
 	}
-
-	headers := services.GetOfficialHeaders(auth, nil)
-	req, _ := http.NewRequest("GET", "https://aistudio.xiaomimimo.com/open-apis/bot/config", nil)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := services.GlobalHTTPClient.Do(req)
-	if err == nil {
-		defer resp.Body.Close()
-	}
-	if err == nil && resp.StatusCode == http.StatusOK {
-		var result struct {
-			Code int `json:"code"`
-			Data struct {
-				ModelConfigList []struct {
-					Model string `json:"model"`
-				} `json:"modelConfigList"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Code == 0 {
-			for _, m := range result.Data.ModelConfigList {
-				addModel(m.Model, "mimo")
-			}
-			response := gin.H{"models": modelsList}
-			services.GlobalCache.Set("ollama_models_list", response, 30*time.Minute)
-			c.JSON(http.StatusOK, response)
-			return
-		}
-	}
-
-	addModel("mimo-v2.5-pro", "mimo")
-	c.JSON(http.StatusOK, gin.H{"models": modelsList})
+	response := gin.H{"models": modelsList}
+	services.GlobalCache.Set("ollama_models_list", response, 30*time.Minute)
+	c.JSON(http.StatusOK, response)
 }
 
 func ollamaModelTag(model string, family string) gin.H {
@@ -926,18 +894,18 @@ func respondOllamaNonStream(c *gin.Context, body io.Reader, spec ollamaRequestSp
 }
 
 type ollamaStreamState struct {
-	spec            ollamaRequestSpec
-	model           string
-	query           string
-	sessionHandle   string
-	startedAt       time.Time
-	inThinking      bool
-	inToolCall      bool
-	toolCallBuffer  strings.Builder
-	fullText        strings.Builder
-	reasoningText   strings.Builder
-	usage           models.Usage
-	streamDone      bool
+	spec           ollamaRequestSpec
+	model          string
+	query          string
+	sessionHandle  string
+	startedAt      time.Time
+	inThinking     bool
+	inToolCall     bool
+	toolCallBuffer strings.Builder
+	fullText       strings.Builder
+	reasoningText  strings.Builder
+	usage          models.Usage
+	streamDone     bool
 }
 
 func newOllamaStreamState(spec ollamaRequestSpec, model, query, sessionHandle string, startedAt time.Time) *ollamaStreamState {

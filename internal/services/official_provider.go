@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"flip-ai/internal/models"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -98,19 +98,6 @@ func SelectOfficialProvider(model string) (OfficialProvider, bool) {
 	}
 
 	return OfficialProvider{}, false
-}
-
-func OfficialProviderModels() []map[string]interface{} {
-	return []map[string]interface{}{
-		{"id": "gemini-3.5-flash", "object": "model", "created": 1700000000, "owned_by": "google", "description": "Google Gemini API free-tier capable model"},
-		{"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google", "description": "Google Gemini API flash model"},
-		{"id": "groq/llama-3.1-8b-instant", "object": "model", "created": 1700000000, "owned_by": "groq", "description": "Groq free plan model"},
-		{"id": "groq/llama-3.3-70b-versatile", "object": "model", "created": 1700000000, "owned_by": "groq", "description": "Groq free plan model"},
-		{"id": "openrouter/meta-llama/llama-3.1-8b-instruct:free", "object": "model", "created": 1700000000, "owned_by": "openrouter", "description": "OpenRouter free model alias"},
-		{"id": "openrouter/google/gemma-3-12b-it:free", "object": "model", "created": 1700000000, "owned_by": "openrouter", "description": "OpenRouter free model alias"},
-		{"id": "cf/@cf/meta/llama-3.1-8b-instruct", "object": "model", "created": 1700000000, "owned_by": "cloudflare", "description": "Cloudflare Workers AI model"},
-		{"id": "cf/@cf/openai/gpt-oss-120b", "object": "model", "created": 1700000000, "owned_by": "cloudflare", "description": "Cloudflare Workers AI model"},
-	}
 }
 
 func ForwardOfficialChat(provider OfficialProvider, rawBody []byte) (*http.Response, error) {

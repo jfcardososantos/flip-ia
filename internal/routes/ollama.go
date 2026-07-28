@@ -364,7 +364,7 @@ func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel st
 	}
 	result, err := services.KimiChat(session, accessToken, targetModel, spec.Messages)
 	if err != nil {
-		writeOllamaError(c, spec.Stream, http.StatusBadGateway, "Failed to call Kimi Web: "+err.Error())
+		writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to call Kimi Web: "+err.Error())
 		return
 	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)
@@ -397,11 +397,11 @@ func runOfficialOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 
 	resp, err := services.ForwardOfficialChat(provider, body)
 	if err != nil {
-		writeOllamaError(c, spec.Stream, http.StatusBadGateway, "Failed to call "+provider.Name+": "+err.Error())
+		writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to call "+provider.Name+": "+err.Error())
 		return
 	}
 	if resp == nil {
-		writeOllamaError(c, spec.Stream, http.StatusBadGateway, provider.Name+" returned no response")
+		writeOllamaError(c, spec.Stream, upstreamFailureStatus, provider.Name+" returned no response")
 		return
 	}
 	defer resp.Body.Close()
@@ -444,7 +444,7 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 	if sessionID == "" {
 		sessionID, err = services.CreateDeepSeekSession(auth, session, customHeaders)
 		if err != nil {
-			writeOllamaError(c, spec.Stream, http.StatusBadGateway, "Failed to create DeepSeek chat session: "+err.Error())
+			writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to create DeepSeek chat session: "+err.Error())
 			return
 		}
 		if sessionHandle != "" {
@@ -470,11 +470,11 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 
 	resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, prompt, thinking, search, customHeaders)
 	if err != nil {
-		writeOllamaError(c, spec.Stream, http.StatusBadGateway, "Failed to call DeepSeek: "+err.Error())
+		writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to call DeepSeek: "+err.Error())
 		return
 	}
 	if resp == nil {
-		writeOllamaError(c, spec.Stream, http.StatusBadGateway, "DeepSeek returned no response")
+		writeOllamaError(c, spec.Stream, upstreamFailureStatus, "DeepSeek returned no response")
 		return
 	}
 
@@ -540,13 +540,13 @@ type openAIChatResponse struct {
 func respondOpenAIAsOllama(c *gin.Context, body io.Reader, spec ollamaRequestSpec, targetModel string, startedAt time.Time) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read provider response: " + err.Error()})
+		c.JSON(upstreamFailureStatus, gin.H{"error": "failed to read provider response: " + err.Error()})
 		return
 	}
 
 	var parsed openAIChatResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to parse provider response", "details": string(respBody)})
+		c.JSON(upstreamFailureStatus, gin.H{"error": "failed to parse provider response", "details": string(respBody)})
 		return
 	}
 

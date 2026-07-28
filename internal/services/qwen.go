@@ -108,16 +108,19 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 
 	messageFID := qwenID()
 	now := time.Now()
+	var parentParam interface{}
+	if strings.TrimSpace(state.ParentMessageID) != "" {
+		parentParam = state.ParentMessageID
+	}
 	message := map[string]interface{}{
 		"id":            nil,
 		"fid":           messageFID,
-		"parentId":      state.ParentMessageID,
-		"parent_id":     state.ParentMessageID,
+		"parentId":      parentParam,
+		"parent_id":     parentParam,
 		"childrenIds":   []interface{}{},
 		"role":          "user",
 		"content":       prompt,
 		"user_action":   "chat",
-		"files":         []interface{}{},
 		"timestamp":     now.Unix(),
 		"models":        []string{upstreamModel},
 		"model":         "",
@@ -142,7 +145,7 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 		"chat_mode":          "normal",
 		"model":              upstreamModel,
 		"parentId":           state.ParentMessageID,
-		"parent_id":          state.ParentMessageID,
+		"parent_id":          parentParam,
 		"messages":           []interface{}{message},
 		"timestamp":          now.Unix(),
 		"stream_options":     map[string]bool{"include_usage": true},
@@ -277,7 +280,8 @@ func qwenHeaders(session StoredWebSession) map[string]string {
 		"source":       "web",
 		"Timezone":     qwenEnvOrDefault("QWEN_WEB_TIMEZONE", "America/Bahia"),
 	}
-	if token := strings.TrimSpace(WebSessionToken(session)); token != "" {
+	if token := strings.TrimSpace(WebSessionToken(session)); token != "" &&
+		envBoolDefault("QWEN_WEB_USE_AUTHORIZATION", false) {
 		headers["Authorization"] = "Bearer " + token
 	}
 	allowed := map[string]bool{

@@ -27,6 +27,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const upstreamFailureStatus = http.StatusFailedDependency
+
 var (
 	TokenStats       = make(map[string]int)
 	TokenUsageStats  = make(map[string]int)
@@ -877,7 +879,7 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 		result, updatedState, err = services.QwenWebChat(session, upstreamModel, state, prompt, state.Title, thinking, search)
 	}
 	if err != nil {
-		utils.SendError(c, http.StatusBadGateway, "Failed to call Qwen Web: "+err.Error()+". If Qwen requested verification, open chat.qwen.ai in Chrome and import the session again.", "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, "Failed to call Qwen Web: "+err.Error()+". If Qwen requested verification, open chat.qwen.ai in Chrome and import the session again.", "server_error", nil)
 		return
 	}
 
@@ -1006,7 +1008,7 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 	}
 	result, err := services.KimiChat(session, accessToken, targetModel, messages)
 	if err != nil {
-		utils.SendError(c, http.StatusBadGateway, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
 		return
 	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)
@@ -1058,7 +1060,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 		sessionID, err = services.CreateDeepSeekSession(auth, session, customHeaders)
 		if err != nil {
 			fmt.Printf("[%s] DeepSeek create session failed: %v\n", completionID, err)
-			utils.SendError(c, http.StatusBadGateway, "Failed to create DeepSeek chat session: "+err.Error(), "server_error", nil)
+			utils.SendError(c, upstreamFailureStatus, "Failed to create DeepSeek chat session: "+err.Error(), "server_error", nil)
 			return
 		}
 		if sessionHandle != "" {
@@ -1090,12 +1092,12 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 			return
 		}
 		fmt.Printf("[%s] DeepSeek request failed: %v\n", completionID, err)
-		utils.SendError(c, http.StatusBadGateway, "Failed to call DeepSeek: "+err.Error(), "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, "Failed to call DeepSeek: "+err.Error(), "server_error", nil)
 		return
 	}
 	if resp == nil {
 		fmt.Printf("[%s] DeepSeek returned nil response\n", completionID)
-		utils.SendError(c, http.StatusBadGateway, "DeepSeek returned no response", "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, "DeepSeek returned no response", "server_error", nil)
 		return
 	}
 
@@ -1145,11 +1147,11 @@ func handleOfficialProviderChatCompletions(c *gin.Context, input openAIChatInput
 
 	resp, err := services.ForwardOfficialChat(provider, bodyCopy)
 	if err != nil {
-		utils.SendError(c, http.StatusBadGateway, "Failed to call "+provider.Name+": "+err.Error(), "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, "Failed to call "+provider.Name+": "+err.Error(), "server_error", nil)
 		return
 	}
 	if resp == nil {
-		utils.SendError(c, http.StatusBadGateway, provider.Name+" returned no response", "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, provider.Name+" returned no response", "server_error", nil)
 		return
 	}
 	defer resp.Body.Close()
@@ -1167,7 +1169,7 @@ func handleOfficialProviderChatCompletions(c *gin.Context, input openAIChatInput
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		utils.SendError(c, http.StatusBadGateway, "Failed to read "+provider.Name+" response: "+err.Error(), "server_error", nil)
+		utils.SendError(c, upstreamFailureStatus, "Failed to read "+provider.Name+" response: "+err.Error(), "server_error", nil)
 		return
 	}
 	contentType := resp.Header.Get("Content-Type")

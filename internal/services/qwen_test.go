@@ -59,13 +59,14 @@ func TestQwenContextError(t *testing.T) {
 }
 
 func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testing.T) {
+	t.Setenv("QWEN_WEB_USE_AUTHORIZATION", "false")
 	var createCalled, completionCalled, updateCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Cookie") != "session=qwen" {
 			t.Errorf("cookie header = %q", r.Header.Get("Cookie"))
 		}
-		if r.Header.Get("Authorization") != "Bearer token-1" {
-			t.Errorf("authorization header = %q", r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("web requests must not send authorization by default: %q", r.Header.Get("Authorization"))
 		}
 		switch r.URL.Path {
 		case "/api/chats/new":
@@ -80,6 +81,14 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			}
 			if payload["chat_id"] != "chat_1" || payload["model"] != "qwen3.7-plus" {
 				t.Errorf("unexpected completion payload: %+v", payload)
+			}
+			if payload["parent_id"] != nil {
+				t.Errorf("new chat parent_id = %#v; want null", payload["parent_id"])
+			}
+			messages, _ := payload["messages"].([]interface{})
+			firstMessage, _ := messages[0].(map[string]interface{})
+			if firstMessage["parent_id"] != nil || firstMessage["parentId"] != nil {
+				t.Errorf("new user message parents must be null: %+v", firstMessage)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte("data: {\"response.created\":{\"chat_id\":\"chat_1\",\"parent_id\":\"user_1\",\"response_id\":\"assistant_1\"}}\n\n"))
@@ -116,5 +125,18 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 	}
 	if !createCalled || !completionCalled || !updateCalled {
 		t.Fatalf("missing upstream calls: create=%v completion=%v update=%v", createCalled, completionCalled, updateCalled)
+	}
+}
+
+func TestQwenHeadersAuthorizationIsExplicitOptIn(t *testing.T) {
+	session := StoredWebSession{Cookie: "session=qwen", Token: "token-1"}
+	t.Setenv("QWEN_WEB_USE_AUTHORIZATION", "false")
+	if got := qwenHeaders(session)["Authorization"]; got != "" {
+		t.Fatalf("authorization enabled by default: %q", got)
+	}
+
+	t.Setenv("QWEN_WEB_USE_AUTHORIZATION", "true")
+	if got := qwenHeaders(session)["Authorization"]; got != "Bearer token-1" {
+		t.Fatalf("authorization opt-in = %q; want Bearer token-1", got)
 	}
 }

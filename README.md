@@ -334,9 +334,11 @@ QWEN_WEB_HANDOFF_CHARS=120000
 QWEN_WEB_THINKING=true
 QWEN_WEB_TIMEZONE=America/Bahia
 QWEN_WEB_VERSION=0.2.80
+QWEN_WEB_USE_AUTHORIZATION=false
 ```
 
 Como esse adapter usa a sessão web, mudanças do site ou verificações anti-bot podem exigir abrir o Qwen no Chrome e importar a sessão novamente.
+No modo web, a Qwen autentica pelas cookies da sessão e o proxy não envia `Authorization` por padrão. Ative `QWEN_WEB_USE_AUTHORIZATION=true` somente se estiver reproduzindo um cliente desktop que realmente envie esse header.
 
 Para garantir que várias chamadas continuem exatamente no mesmo chat Qwen, envie um valor estável em `user`:
 

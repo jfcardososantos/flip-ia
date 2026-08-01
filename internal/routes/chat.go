@@ -1113,6 +1113,9 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	bodyReader, closeBody := services.ReadDeepSeekBody(resp)
 	result := services.ParseDeepSeekStream(bodyReader)
 	closeBody()
+	if agentMode {
+		result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, thinking, search, customHeaders, toolChoice, completionID)
+	}
 	result.Usage.PromptTokens = len(prompt) / 4
 	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
 
@@ -1137,6 +1140,48 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result, responseCalls)
 	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	c.JSON(http.StatusOK, response)
+}
+
+// recoverDeepSeekAgentToolCall prevents an agent turn from ending in a promise
+// such as "vou verificar" without a call the client can actually execute.
+// DeepSeek Web does not natively support the OpenAI tools protocol, so this is
+// a bounded semantic retry using the same conversation session.
+func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.DeepSeekAuth, session services.StoredWebSession, sessionID, prompt string, thinking, search bool, customHeaders map[string]string, toolChoice, completionID string) models.DeepSeekChatResult {
+	result := first
+	currentPrompt := prompt
+	for attempt := 0; attempt < 3; attempt++ {
+		_, calls := utils.ParseToolCalls(result.Content)
+		parsed := parsedMimoChat{
+			CleanText:     result.Content,
+			ReasoningText: result.ReasoningText,
+			ToolCalls:     calls,
+		}
+		if !shouldRetryAgentToolCall(parsed, toolChoice) {
+			return result
+		}
+
+		currentPrompt = buildAgentToolRetryQuery(currentPrompt, parsed)
+		resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, currentPrompt, thinking, search, customHeaders)
+		if err != nil {
+			fmt.Printf("[%s] DeepSeek agent recovery request failed: %v\n", completionID, err)
+			return result
+		}
+		if resp == nil {
+			fmt.Printf("[%s] DeepSeek agent recovery returned nil response\n", completionID)
+			return result
+		}
+		if resp.StatusCode != http.StatusOK {
+			bodyReader, closeBody := services.ReadDeepSeekBody(resp)
+			body, _ := io.ReadAll(bodyReader)
+			closeBody()
+			fmt.Printf("[%s] DeepSeek agent recovery non-200: %d - %s\n", completionID, resp.StatusCode, string(body))
+			return result
+		}
+		bodyReader, closeBody := services.ReadDeepSeekBody(resp)
+		result = services.ParseDeepSeekStream(bodyReader)
+		closeBody()
+	}
+	return result
 }
 
 func handleOfficialProviderChatCompletions(c *gin.Context, input openAIChatInput, bodyCopy []byte, completionID string, targetModel string, provider services.OfficialProvider) {

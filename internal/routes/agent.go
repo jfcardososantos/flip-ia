@@ -11,10 +11,11 @@ package routes
 
 import (
 	"encoding/json"
-	"fmt"
 	"flip-ai/internal/agent"
 	"flip-ai/internal/utils"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -32,6 +33,7 @@ type AgentRunRequest struct {
 	GoalID   string `json:"goal_id"`
 	Goal     string `json:"goal" binding:"required"`
 	MaxSteps int    `json:"max_steps"`
+	Mode     string `json:"mode"`
 }
 
 func handleRunAgent(c *gin.Context) {
@@ -47,23 +49,40 @@ func handleRunAgent(c *gin.Context) {
 
 	maxSteps := req.MaxSteps
 	if maxSteps <= 0 {
-		maxSteps = 10
+		maxSteps = 60
+	}
+	if maxSteps > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_steps must be between 1 and 100"})
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "coding"
+	}
+	if mode != "coding" && mode != "legacy" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mode must be coding or legacy"})
+		return
 	}
 
 	// Run in background for asynchrony
 	go func() {
-		agent.RunAgentLoop(req.GoalID, req.Goal, maxSteps)
+		if mode == "legacy" {
+			_, _ = agent.RunAgentLoop(req.GoalID, req.Goal, maxSteps)
+			return
+		}
+		_, _ = agent.RunCodingAgentLoop(req.GoalID, req.Goal, agent.CodingAgentWorkspace(), maxSteps)
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{
 		"message": "Agent loop started",
 		"goal_id": req.GoalID,
+		"mode":    mode,
 	})
 }
 
 func handleGetAgentStatus(c *gin.Context) {
 	id := c.Param("id")
-	
+
 	state, err := agent.LoadOrInitializeState(id, "")
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "State not found or failed to load"})
@@ -75,7 +94,7 @@ func handleGetAgentStatus(c *gin.Context) {
 
 func handleStreamAgent(c *gin.Context) {
 	id := c.Param("id")
-	
+
 	// Ensure SSE headers
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -99,7 +118,7 @@ func handleStreamAgent(c *gin.Context) {
 			eventBytes, _ := json.Marshal(event)
 			c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(eventBytes)))
 			c.Writer.Flush()
-			
+
 			// If finished, close connection automatically
 			if event.Type == "finished" {
 				return
@@ -107,4 +126,3 @@ func handleStreamAgent(c *gin.Context) {
 		}
 	}
 }
-

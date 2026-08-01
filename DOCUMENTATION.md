@@ -480,7 +480,7 @@ curl -s http://localhost:3000/api/version | jq
 
 ## 6. Agent API
 
-Endpoints para executar agentes autônomos (loop planejador → executor → crítico).
+Endpoints para executar agentes autônomos. O modo padrão é `coding`: um loop direto de decisão → tool → resultado, com filesystem restrito a um workspace e sem shell ou HTTP expostos ao modelo. O modo legado (planejador → executor → crítico) continua disponível de forma explícita.
 
 ---
 
@@ -493,7 +493,8 @@ curl -s http://localhost:3000/v1/agent/run \
   -H "Content-Type: application/json" \
   -d '{
     "goal": "Crie um arquivo hello.py com um print('Hello World')",
-    "max_steps": 10
+    "max_steps": 60,
+    "mode": "coding"
   }' | jq
 ```
 
@@ -503,7 +504,10 @@ curl -s http://localhost:3000/v1/agent/run \
 |-------|------|-------------|--------|-----------|
 | `goal` | string | ✅ | — | Objetivo a ser cumprido |
 | `goal_id` | string | ❌ | auto gerado | ID para acompanhamento |
-| `max_steps` | number | ❌ | `10` | Número máximo de passos |
+| `max_steps` | number | ❌ | `60` | Número máximo de passos (máximo `100`) |
+| `mode` | string | ❌ | `coding` | `coding` usa tools isoladas; `legacy` mantém o loop antigo |
+
+No modo `coding`, o agente só recebe as tools `list_files`, `search`, `read_file`, `apply_patch` (diff unificado) e `run_check`. As verificações permitidas são `go_test`, `go_vet`, `go_build`, `npm_test`, `npm_run_build` e `npm_run_lint`. Configure `CODING_AGENT_WORKSPACE` com um caminho absoluto para isolar cada projeto em produção.
 
 **Resposta (202 Accepted):**
 
@@ -828,6 +832,10 @@ O proxy suporta upload de imagens para a Xiaomi. O processo é:
 | `AUTH_STORE_PATH` | ❌ | `data/auth.json` | Caminho do arquivo de sessão |
 | `DEFAULT_WEB_SEARCH` | ❌ | — | Se `true`, ativa web search em todas as chamadas |
 | `AGENT_ENABLE_THINKING` | ❌ | — | Se `true`, mantém thinking ativo mesmo com tools |
+| `CODING_AGENT_WORKSPACE` | ❌ | diretório do processo | Workspace permitido ao modo `coding` |
+| `CODING_AGENT_TOOL_TIMEOUT_SECONDS` | ❌ | `60` | Timeout por tool do modo `coding` |
+| `CODING_AGENT_MAX_FILE_BYTES` | ❌ | `256000` | Tamanho máximo de arquivo lido pelo agente |
+| `CODING_AGENT_MAX_TOOL_OUTPUT_CHARS` | ❌ | `12000` | Saída máxima enviada ao modelo após cada tool |
 
 ---
 

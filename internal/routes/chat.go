@@ -1403,7 +1403,6 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	var inThinking bool
 	var inToolCall bool
 	var sentToolCallName bool
-	var emittedToolCall bool
 	var currentToolID string
 	var toolCallIndex int
 	var toolCallBuffer strings.Builder
@@ -1456,13 +1455,6 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	if inToolCall && toolCallBuffer.Len() > 0 {
 		rawToolCall := completeToolCallBuffer(toolCallBuffer.String())
 		fullText.WriteString(rawToolCall)
-
-		if _, parsedToolCalls := utils.ParseToolCalls(rawToolCall); len(parsedToolCalls) > 0 {
-			parsedToolCalls = utils.AssignToolCallIndexes(parsedToolCalls)
-			parsedToolCalls[0].Index = toolCallIndex
-			utils.EmitStreamToolCall(c, completionID, model, parsedToolCalls[0])
-			emittedToolCall = true
-		}
 	}
 
 	_, toolCalls := utils.ParseToolCalls(fullText.String())
@@ -1484,10 +1476,8 @@ func processStream(c *gin.Context, body io.Reader, completionID, model string, u
 	services.SaveMessage(userID, "asst_"+completionID, "assistant", assistantTranscript(fullText.String(), reasoningText.String()))
 
 	if finishReason == "tool_calls" {
-		if !emittedToolCall && len(responseCalls) > 0 {
-			for _, tc := range responseCalls {
-				utils.EmitStreamToolCall(c, completionID, model, tc)
-			}
+		for _, tc := range responseCalls {
+			utils.EmitStreamToolCall(c, completionID, model, tc)
 		}
 		storePendingToolCalls(userID, toolCalls)
 	}
@@ -2255,15 +2245,6 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 				toolCallBuffer.WriteString(utils.ToolCallCloseTag)
 				rawToolCall := toolCallBuffer.String()
 				fullText.WriteString(rawToolCall)
-
-				if isStreaming {
-					_, parsedToolCalls := utils.ParseToolCalls(rawToolCall)
-					if len(parsedToolCalls) > 0 {
-						parsedToolCalls = utils.AssignToolCallIndexes(parsedToolCalls)
-						parsedToolCalls[0].Index = *toolCallIndex
-						utils.EmitStreamToolCall(c, completionID, model, parsedToolCalls[0])
-					}
-				}
 
 				*inToolCall = false
 				*sentToolCallName = false

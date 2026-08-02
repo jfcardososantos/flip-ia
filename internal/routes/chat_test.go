@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -165,5 +166,63 @@ func TestShouldNotRetryAgentToolCallForCompletedPortugueseResponse(t *testing.T)
 
 	if shouldRetryAgentToolCall(result, "auto") {
 		t.Fatalf("expected no retry for completed response")
+	}
+}
+
+func TestShouldRetryAgentToolCallForMalformedExecuteCodePayload(t *testing.T) {
+	result := parsedMimoChat{
+		CleanText: `doc_content = docs_service.documents().get(documentId=doc_id).execute()
+for titulo in titulos:
+    format_requests.append({"updateParagraphStyle": {}})
+docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": format_requests}).execute()
+print("Documento formatado")
+", timeout: 30 }`,
+		FinishReason: "stop",
+	}
+
+	if !shouldRetryAgentToolCall(result, "auto") {
+		t.Fatalf("expected retry for malformed execute_code payload")
+	}
+}
+
+func TestSynthesizeCodeExecutionToolCalls(t *testing.T) {
+	text := `Vou executar com execute_code:
+doc_content = docs_service.documents().get(documentId=doc_id).execute()
+for titulo in titulos:
+    format_requests.append({"title": titulo})
+docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": format_requests}).execute()
+print("Documento formatado")
+", timeout: 30 }`
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "execute_code",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"code":    map[string]interface{}{"type": "string"},
+					"timeout": map[string]interface{}{"type": "integer"},
+				},
+			},
+		},
+	}}
+
+	calls := synthesizeCodeExecutionToolCalls(text, tools)
+	if len(calls) != 1 {
+		t.Fatalf("expected one synthesized call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "execute_code" {
+		t.Fatalf("unexpected tool: %s", calls[0].Function.Name)
+	}
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
+		t.Fatalf("invalid synthesized arguments: %v", err)
+	}
+	code, _ := args["code"].(string)
+	if !strings.HasPrefix(code, "doc_content =") || strings.Contains(code, "timeout:") {
+		t.Fatalf("unexpected recovered code: %q", code)
+	}
+	if args["timeout"] != float64(30) {
+		t.Fatalf("unexpected timeout: %#v", args["timeout"])
 	}
 }

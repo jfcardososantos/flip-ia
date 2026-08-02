@@ -1114,7 +1114,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	result := services.ParseDeepSeekStream(bodyReader)
 	closeBody()
 	if agentMode {
-		result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, thinking, search, customHeaders, toolChoice, completionID)
+		result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, thinking, search, customHeaders, toolChoice, completionID, input.Tools)
 	}
 	result.Usage.PromptTokens = len(prompt) / 4
 	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
@@ -1146,9 +1146,8 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 // such as "vou verificar" without a call the client can actually execute.
 // DeepSeek Web does not natively support the OpenAI tools protocol, so this is
 // a bounded semantic retry using the same conversation session.
-func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.DeepSeekAuth, session services.StoredWebSession, sessionID, prompt string, thinking, search bool, customHeaders map[string]string, toolChoice, completionID string) models.DeepSeekChatResult {
+func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.DeepSeekAuth, session services.StoredWebSession, sessionID, prompt string, thinking, search bool, customHeaders map[string]string, toolChoice, completionID string, tools []models.Tool) models.DeepSeekChatResult {
 	result := first
-	currentPrompt := prompt
 	for attempt := 0; attempt < 3; attempt++ {
 		_, calls := utils.ParseToolCalls(result.Content)
 		parsed := parsedMimoChat{
@@ -1160,26 +1159,47 @@ func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.D
 			return result
 		}
 
-		currentPrompt = buildAgentToolRetryQuery(currentPrompt, parsed)
+		// Always rebuild from the original request. Reusing the previous correction
+		// recursively made each retry larger and encouraged DeepSeek to repeat the
+		// malformed code block instead of emitting the tool envelope.
+		currentPrompt := buildAgentToolRetryQuery(prompt, parsed)
 		resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, currentPrompt, thinking, search, customHeaders)
 		if err != nil {
 			fmt.Printf("[%s] DeepSeek agent recovery request failed: %v\n", completionID, err)
-			return result
+			return recoverDeepSeekCodeToolCall(result, tools)
 		}
 		if resp == nil {
 			fmt.Printf("[%s] DeepSeek agent recovery returned nil response\n", completionID)
-			return result
+			return recoverDeepSeekCodeToolCall(result, tools)
 		}
 		if resp.StatusCode != http.StatusOK {
 			bodyReader, closeBody := services.ReadDeepSeekBody(resp)
 			body, _ := io.ReadAll(bodyReader)
 			closeBody()
 			fmt.Printf("[%s] DeepSeek agent recovery non-200: %d - %s\n", completionID, resp.StatusCode, string(body))
-			return result
+			return recoverDeepSeekCodeToolCall(result, tools)
 		}
 		bodyReader, closeBody := services.ReadDeepSeekBody(resp)
 		result = services.ParseDeepSeekStream(bodyReader)
 		closeBody()
+	}
+
+	return recoverDeepSeekCodeToolCall(result, tools)
+}
+
+// DeepSeek occasionally returns the intended execute_code payload as raw code.
+// Recover that unambiguous case instead of presenting the code to the IDE as
+// though the requested action had completed.
+func recoverDeepSeekCodeToolCall(result models.DeepSeekChatResult, tools []models.Tool) models.DeepSeekChatResult {
+	if _, calls := utils.ParseToolCalls(result.Content); len(calls) > 0 {
+		return result
+	}
+	if calls := synthesizeCodeExecutionToolCalls(result.Content, tools); len(calls) > 0 {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"name":      calls[0].Function.Name,
+			"arguments": json.RawMessage(calls[0].Function.Arguments),
+		})
+		result.Content = "<tool_call>" + string(payload) + "</tool_call>"
 	}
 	return result
 }
@@ -1732,6 +1752,13 @@ func runAgentSemanticRetries(firstResp *http.Response, payload models.MimoPayloa
 			if synthesized := synthesizePathReadToolCalls(parsed, tools, parallelToolCalls); len(synthesized.ToolCalls) > 0 {
 				return synthesized, statToken
 			}
+			if calls := synthesizeCodeExecutionToolCalls(parsed.CleanText, tools); len(calls) > 0 {
+				parsed.CleanText = ""
+				parsed.ToolCalls = finalizeToolCalls(calls)
+				parsed.ResponseCalls = responseToolCalls(parsed.ToolCalls, parallelToolCalls, true)
+				parsed.FinishReason = "tool_calls"
+				return parsed, statToken
+			}
 			return parsed, statToken
 		}
 
@@ -1899,6 +1926,123 @@ func selectPathArgumentName(tool models.Tool) string {
 	return "filePath"
 }
 
+func synthesizeCodeExecutionToolCalls(text string, tools []models.Tool) []models.ToolCall {
+	if !looksLikeMalformedToolAttempt(text) {
+		return nil
+	}
+
+	tool, codeArg, timeoutArg := selectCodeExecutionTool(tools)
+	if tool == "" || codeArg == "" {
+		return nil
+	}
+	code := extractMalformedCodePayload(text)
+	if code == "" {
+		return nil
+	}
+
+	args := map[string]interface{}{codeArg: code}
+	if timeoutArg != "" {
+		args[timeoutArg] = 30
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return nil
+	}
+	return []models.ToolCall{{
+		ID:   "call_" + utils.GenerateID(),
+		Type: "function",
+		Function: models.ToolFunction{
+			Name:      tool,
+			Arguments: string(encoded),
+		},
+	}}
+}
+
+func selectCodeExecutionTool(tools []models.Tool) (name, codeArg, timeoutArg string) {
+	preferred := []string{"execute_code", "run_code", "execute_python", "run_python", "python"}
+	for _, candidate := range preferred {
+		for _, tool := range tools {
+			if tool.Type == "function" && strings.EqualFold(tool.Function.Name, candidate) {
+				codeArg, timeoutArg = selectCodeArguments(tool)
+				if codeArg != "" {
+					return tool.Function.Name, codeArg, timeoutArg
+				}
+			}
+		}
+	}
+	for _, tool := range tools {
+		if tool.Type != "function" {
+			continue
+		}
+		lower := strings.ToLower(tool.Function.Name)
+		if !strings.Contains(lower, "code") && !strings.Contains(lower, "python") {
+			continue
+		}
+		codeArg, timeoutArg = selectCodeArguments(tool)
+		if codeArg != "" {
+			return tool.Function.Name, codeArg, timeoutArg
+		}
+	}
+	return "", "", ""
+}
+
+func selectCodeArguments(tool models.Tool) (codeArg, timeoutArg string) {
+	var schema map[string]interface{}
+	b, err := json.Marshal(tool.Function.Parameters)
+	if err == nil {
+		_ = json.Unmarshal(b, &schema)
+	}
+	props, _ := schema["properties"].(map[string]interface{})
+	for _, candidate := range []string{"code", "source", "script", "python_code", "command"} {
+		if _, ok := props[candidate]; ok {
+			codeArg = candidate
+			break
+		}
+	}
+	for _, candidate := range []string{"timeout", "timeout_seconds"} {
+		if _, ok := props[candidate]; ok {
+			timeoutArg = candidate
+			break
+		}
+	}
+	return codeArg, timeoutArg
+}
+
+func extractMalformedCodePayload(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+
+	// Prefer the body of a Markdown fence when the model produced one despite
+	// being instructed to return a tool call.
+	if match := regexp.MustCompile("(?s)```(?:python|py)?\\s*(.*?)\\s*```").FindStringSubmatch(text); len(match) > 1 {
+		text = strings.TrimSpace(match[1])
+	}
+
+	lines := strings.Split(text, "\n")
+	// A common malformed ending is the remainder of an arguments object:
+	// `", timeout: 30 }`. It is metadata, not part of the program.
+	if len(lines) > 0 {
+		last := strings.ToLower(strings.TrimSpace(lines[len(lines)-1]))
+		if strings.Contains(last, "timeout:") || strings.Contains(last, `"timeout"`) {
+			lines = lines[:len(lines)-1]
+		}
+	}
+	text = strings.TrimSpace(strings.Join(lines, "\n"))
+
+	// Drop short prose preceding an unfenced program while keeping comments and
+	// the complete executable body.
+	lines = strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if regexp.MustCompile(`^(?:from\s+\S+\s+import\s+|import\s+|def\s+|class\s+|for\s+|if\s+|[A-Za-z_]\w*\s*=|[A-Za-z_]\w*\.)`).MatchString(trimmed) {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
+	}
+	return text
+}
+
 func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 	if len(result.ToolCalls) > 0 {
 		return false
@@ -1912,6 +2056,9 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 	}
 
 	rawClean := strings.TrimSpace(result.CleanText)
+	if looksLikeMalformedToolAttempt(rawClean) {
+		return true
+	}
 	if agentLocationOnlyRegex.MatchString(rawClean) || len(extractPathOnlyResponse(rawClean)) > 0 || len(extractReadCommandPaths(rawClean)) > 0 {
 		return true
 	}
@@ -1923,6 +2070,34 @@ func shouldRetryAgentToolCall(result parsedMimoChat, toolChoice string) bool {
 	}
 
 	return looksLikeActionIntentOnlyResponse(clean)
+}
+
+func looksLikeMalformedToolAttempt(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "<tool_call") {
+		return true
+	}
+
+	codeMarkers := 0
+	for _, marker := range []string{".execute()", "batchupdate(", "documents().", "format_requests.append(", "subprocess.", "requests.", "print("} {
+		if strings.Contains(lower, marker) {
+			codeMarkers++
+		}
+	}
+	if codeMarkers < 2 {
+		return false
+	}
+
+	// These are characteristic remnants of a tool argument object emitted as
+	// prose, as in: raw Python followed by `", timeout: 30 }`.
+	return strings.Contains(lower, "execute_code") ||
+		strings.Contains(lower, "timeout:") ||
+		strings.Contains(lower, `"timeout"`) ||
+		strings.Contains(lower, "(3/3)")
 }
 
 func looksLikeActionIntentOnlyResponse(clean string) bool {
@@ -2028,7 +2203,8 @@ func buildAgentToolRetryQuery(originalQuery string, result parsedMimoChat) strin
 	sb.WriteString(originalQuery)
 	sb.WriteString("\n\n# Adapter correction\n")
 	sb.WriteString("Your previous response did not contain a tool call, so the IDE client could not continue the work.\n")
-	sb.WriteString("If work remains, respond with exactly one <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> block using one available tool. Do not write prose, do not output only a file location, and do not use Markdown fences.\n")
+	sb.WriteString("Any raw code in that response was NOT executed. Do not repeat it as prose. Put the complete code or command inside the tool's JSON arguments.\n")
+	sb.WriteString("If work remains, respond with exactly one <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> block using one available tool. The JSON must be valid: quote property names, escape newlines inside strings, and keep timeout inside arguments. Do not write prose, do not output only a file location, and do not use Markdown fences.\n")
 	sb.WriteString("Only provide a final answer when all requested work is complete.\n")
 	if strings.TrimSpace(result.CleanText) != "" {
 		sb.WriteString("Previous non-action response: ")

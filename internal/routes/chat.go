@@ -1072,6 +1072,7 @@ func recoverKimiAgentToolCall(first services.KimiChatResult, session services.St
 	result := first
 	for attempt := 0; attempt < 2; attempt++ {
 		_, calls := utils.ParseToolCalls(result.Content)
+		calls = filterKimiAllowedToolCalls(calls, tools, toolChoice)
 		parsed := parsedMimoChat{CleanText: result.Content, ReasoningText: result.ReasoningText, ToolCalls: calls}
 		if !shouldRetryAgentToolCall(parsed, toolChoice) {
 			return result
@@ -1099,6 +1100,24 @@ func recoverKimiAgentToolCall(first services.KimiChatResult, session services.St
 		result.Content = "<tool_call>" + string(payload) + "</tool_call>"
 	}
 	return result
+}
+
+func filterKimiAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolChoice string) []models.ToolCall {
+	allowed := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		allowed[strings.ToLower(strings.TrimSpace(tool.Function.Name))] = true
+	}
+	choice := strings.ToLower(strings.TrimSpace(toolChoice))
+	restrictToChoice := choice != "" && choice != "auto" && choice != "required" && choice != "any" && choice != "none"
+	filtered := make([]models.ToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := strings.ToLower(strings.TrimSpace(call.Function.Name))
+		if !allowed[name] || (restrictToChoice && name != choice) {
+			continue
+		}
+		filtered = append(filtered, call)
+	}
+	return filtered
 }
 
 func synthesizeRequiredZeroArgumentToolCall(toolChoice string, tools []models.Tool) (models.ToolCall, bool) {

@@ -278,3 +278,15 @@ func TestSynthesizeRequiredToolCallRejectsRequiredArguments(t *testing.T) {
 		t.Fatal("must not invent arguments for a tool with required parameters")
 	}
 }
+
+func TestFilterKimiAllowedToolCallsRejectsInventedTool(t *testing.T) {
+	tools := []models.Tool{{Type: "function", Function: models.ToolDefinition{Name: "get_current_time"}}}
+	calls := []models.ToolCall{
+		{Type: "function", Function: models.ToolFunction{Name: "ipython", Arguments: `{}`}},
+		{Type: "function", Function: models.ToolFunction{Name: "get_current_time", Arguments: `{}`}},
+	}
+	filtered := filterKimiAllowedToolCalls(calls, tools, "required")
+	if len(filtered) != 1 || filtered[0].Function.Name != "get_current_time" {
+		t.Fatalf("unexpected filtered calls: %+v", filtered)
+	}
+}

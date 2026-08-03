@@ -21,9 +21,12 @@ const kimiWebChatURL = kimiWebBaseURL + "/apiv2/kimi.gateway.chat.v1.ChatService
 type KimiChatResult struct {
 	Content       string
 	ReasoningText string
+	ActualModel   string
 }
 
 var ErrKimiEmptyResponse = errors.New("Kimi stream ended without response content")
+var ErrKimiOverloaded = errors.New("Kimi completion overloaded")
+var ErrKimiResourceExhausted = errors.New("Kimi resource quota exhausted")
 
 type kimiWebModelConfig struct {
 	Scenario        string
@@ -103,6 +106,78 @@ func KimiChat(session StoredWebSession, accessToken, model string, messages []mo
 		return KimiChatResult{}, errors.New("Kimi requires a non-empty user message")
 	}
 
+	var lastErr error
+	for _, candidate := range kimiChatCandidates(model, modelConfig) {
+		body, err := buildKimiChatBody(candidate.config, prompt, systemPrompt)
+		if err != nil {
+			return KimiChatResult{}, err
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			result, requestErr := sendKimiChatRequest(session, accessToken, body)
+			if requestErr == nil {
+				result.ActualModel = candidate.actualModel
+				return result, nil
+			}
+			lastErr = requestErr
+			if !errors.Is(requestErr, ErrKimiEmptyResponse) {
+				break
+			}
+		}
+		if !isRecoverableKimiModelError(lastErr) {
+			return KimiChatResult{}, lastErr
+		}
+	}
+	return KimiChatResult{}, lastErr
+}
+
+type kimiChatCandidate struct {
+	config      kimiWebModelConfig
+	actualModel string
+}
+
+func kimiChatCandidates(model string, primary kimiWebModelConfig) []kimiChatCandidate {
+	if !isKimiK3Alias(model) {
+		return []kimiChatCandidate{{config: primary, actualModel: "kimi-k2.6"}}
+	}
+
+	efforts := []string{primary.ReasoningEffort, "REASONING_EFFORT_HIGH", "REASONING_EFFORT_MEDIUM", "REASONING_EFFORT_LOW"}
+	seen := map[string]bool{}
+	candidates := make([]kimiChatCandidate, 0, len(efforts)+1)
+	for _, effort := range efforts {
+		if seen[effort] {
+			continue
+		}
+		seen[effort] = true
+		config := primary
+		config.ReasoningEffort = effort
+		candidates = append(candidates, kimiChatCandidate{config: config, actualModel: "kimi-k3"})
+	}
+	if kimiK3FallbackEnabled() {
+		fallback, _ := resolveKimiWebModel("kimi-k2.6")
+		candidates = append(candidates, kimiChatCandidate{config: fallback, actualModel: "kimi-k2.6"})
+	}
+	return candidates
+}
+
+func isKimiK3Alias(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "kimi-k3", "kimi/k3", "k3":
+		return true
+	default:
+		return false
+	}
+}
+
+func kimiK3FallbackEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("KIMI_K3_FALLBACK")))
+	return value != "0" && value != "false" && value != "off" && value != "no"
+}
+
+func isRecoverableKimiModelError(err error) bool {
+	return errors.Is(err, ErrKimiEmptyResponse) || errors.Is(err, ErrKimiOverloaded) || errors.Is(err, ErrKimiResourceExhausted)
+}
+
+func buildKimiChatBody(modelConfig kimiWebModelConfig, prompt, systemPrompt string) ([]byte, error) {
 	options := map[string]interface{}{
 		"thinking":         true,
 		"enable_plugin":    false,
@@ -128,22 +203,7 @@ func KimiChat(session StoredWebSession, accessToken, model string, messages []mo
 	if modelConfig.KimiPlusID != "" {
 		payload["kimiplus_id"] = modelConfig.KimiPlusID
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return KimiChatResult{}, err
-	}
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		result, err := sendKimiChatRequest(session, accessToken, body)
-		if err == nil {
-			return result, nil
-		}
-		lastErr = err
-		if !errors.Is(err, ErrKimiEmptyResponse) {
-			break
-		}
-	}
-	return KimiChatResult{}, lastErr
+	return json.Marshal(payload)
 }
 
 func sendKimiChatRequest(session StoredWebSession, accessToken string, body []byte) (KimiChatResult, error) {
@@ -263,6 +323,9 @@ func kimiBlockExceptionError(block map[string]interface{}) error {
 	if len(encoded) > 1200 {
 		encoded = encoded[:1200]
 	}
+	if strings.Contains(string(encoded), "REASON_COMPLETION_OVERLOADED") {
+		return fmt.Errorf("%w: %s", ErrKimiOverloaded, encoded)
+	}
 	return fmt.Errorf("Kimi K3 exception: %s", encoded)
 }
 
@@ -321,6 +384,9 @@ func kimiConnectEndError(event map[string]interface{}) error {
 		message = code
 	} else if code != "" {
 		message = code + ": " + message
+	}
+	if strings.EqualFold(code, "resource_exhausted") {
+		return fmt.Errorf("%w: %s", ErrKimiResourceExhausted, message)
 	}
 	return fmt.Errorf("Kimi stream error: %s", message)
 }

@@ -999,6 +999,11 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 		utils.SendError(c, http.StatusTooManyRequests, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
 		return
 	}
+	responseModel := targetModel
+	if result.ActualModel != "" && !strings.EqualFold(result.ActualModel, targetModel) {
+		responseModel = result.ActualModel
+		c.Header("X-Mimo-Upstream-Fallback", result.ActualModel)
+	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)
 	toolCalls = finalizeToolCalls(toolCalls)
 	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
@@ -1011,11 +1016,13 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 	deepSeekResult := models.DeepSeekChatResult{Content: content, ReasoningText: result.ReasoningText}
 	deepSeekResult.Usage = services.EstimateUsageFromMessages(input.Messages, content)
 	if input.Stream {
-		writeDeepSeekStreamResponse(c, completionID, targetModel, deepSeekResult, responseCalls)
+		writeDeepSeekStreamResponse(c, completionID, responseModel, deepSeekResult, responseCalls)
 		return
 	}
-	response := buildDeepSeekNonStreamResponse(completionID, targetModel, deepSeekResult, responseCalls)
-	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
+	response := buildDeepSeekNonStreamResponse(completionID, responseModel, deepSeekResult, responseCalls)
+	if responseModel == targetModel {
+		services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
+	}
 	c.JSON(http.StatusOK, response)
 }
 

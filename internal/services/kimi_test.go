@@ -92,3 +92,31 @@ func TestKimiK3DefaultsToRegularHighQuota(t *testing.T) {
 		t.Fatalf("expected explicit MAX override, got %+v", config)
 	}
 }
+
+func TestKimiK3CandidatesDegradeEffortAndFallbackTransparently(t *testing.T) {
+	t.Setenv("KIMI_K3_REASONING_EFFORT", "MAX")
+	t.Setenv("KIMI_K3_FALLBACK", "true")
+	config, _ := resolveKimiWebModel("kimi-k3")
+	candidates := kimiChatCandidates("kimi-k3", config)
+	wantEfforts := []string{"REASONING_EFFORT_MAX", "REASONING_EFFORT_HIGH", "REASONING_EFFORT_MEDIUM", "REASONING_EFFORT_LOW", "REASONING_EFFORT_NONE"}
+	if len(candidates) != len(wantEfforts) {
+		t.Fatalf("unexpected candidates: %+v", candidates)
+	}
+	for i, want := range wantEfforts {
+		if candidates[i].config.ReasoningEffort != want {
+			t.Fatalf("candidate %d effort = %q; want %q", i, candidates[i].config.ReasoningEffort, want)
+		}
+	}
+	if candidates[len(candidates)-1].actualModel != "kimi-k2.6" {
+		t.Fatalf("expected transparent K2.6 fallback, got %+v", candidates[len(candidates)-1])
+	}
+}
+
+func TestKimiOverloadExceptionIsRecoverable(t *testing.T) {
+	err := kimiBlockExceptionError(map[string]interface{}{
+		"exception": map[string]interface{}{"error": map[string]interface{}{"reason": "REASON_COMPLETION_OVERLOADED"}},
+	})
+	if !errors.Is(err, ErrKimiOverloaded) {
+		t.Fatalf("expected overload sentinel, got %v", err)
+	}
+}

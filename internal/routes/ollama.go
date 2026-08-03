@@ -371,6 +371,11 @@ func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel st
 		writeOllamaError(c, spec.Stream, http.StatusTooManyRequests, "Failed to call Kimi Web: "+err.Error())
 		return
 	}
+	responseModel := targetModel
+	if result.ActualModel != "" && !strings.EqualFold(result.ActualModel, targetModel) {
+		responseModel = result.ActualModel
+		c.Header("X-Mimo-Upstream-Fallback", result.ActualModel)
+	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)
 	toolCalls = utils.AssignToolCallIndexes(toolCalls)
 	if len(toolCalls) > 0 {
@@ -381,10 +386,10 @@ func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel st
 	}
 	usage := estimateOllamaUsage(spec.Messages, content)
 	if spec.Stream {
-		streamBufferedOllamaResult(c, spec, targetModel, content, result.ReasoningText, toolCalls, "stop", usage, startedAt)
+		streamBufferedOllamaResult(c, spec, responseModel, content, result.ReasoningText, toolCalls, "stop", usage, startedAt)
 		return
 	}
-	respondBufferedOllamaResult(c, spec, targetModel, content, result.ReasoningText, toolCalls, "stop", usage, startedAt)
+	respondBufferedOllamaResult(c, spec, responseModel, content, result.ReasoningText, toolCalls, "stop", usage, startedAt)
 }
 
 func runOfficialOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel string, provider services.OfficialProvider, startedAt time.Time) {

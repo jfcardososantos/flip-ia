@@ -35,7 +35,7 @@ func resolveKimiWebModel(model string) (kimiWebModelConfig, bool) {
 	switch strings.ToLower(strings.TrimSpace(model)) {
 	case "kimi-k3", "kimi/k3", "k3":
 		return kimiWebModelConfig{
-			Scenario: "SCENARIO_OK_COMPUTER", KimiPlusID: "ok-computer",
+			Scenario:        "SCENARIO_AUTOMATION_K3",
 			ReasoningEffort: kimiK3ReasoningEffort(), ContextLength: "CONTEXT_LENGTH_L",
 		}, true
 	case "kimi-k2.6", "kimi/k2.6", "k2d6":

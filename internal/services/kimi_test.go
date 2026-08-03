@@ -82,6 +82,9 @@ func TestKimiK3DefaultsToRegularHighQuota(t *testing.T) {
 	if !ok || config.ReasoningEffort != "REASONING_EFFORT_HIGH" {
 		t.Fatalf("unexpected K3 config: %+v", config)
 	}
+	if config.Scenario != "SCENARIO_AUTOMATION_K3" || config.KimiPlusID != "" {
+		t.Fatalf("K3 API must use the regular automation model, got %+v", config)
+	}
 
 	t.Setenv("KIMI_K3_REASONING_EFFORT", "max")
 	config, _ = resolveKimiWebModel("kimi-k3")

@@ -995,7 +995,10 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
 	}
 	outcome := kimiBufferedOutcome{}
-	if call, ok := synthesizeKimiSkillReadFollowup(input.Messages, input.Tools); agentMode && ok {
+	if call, ok := synthesizeKimiSkillViewFollowup(input.Messages, input.Tools); agentMode && ok {
+		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
+		outcome.result = services.KimiChatResult{Content: "<tool_call>" + string(payload) + "</tool_call>", ActualModel: targetModel}
+	} else if call, ok := synthesizeKimiSkillReadFollowup(input.Messages, input.Tools); agentMode && ok {
 		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
 		outcome.result = services.KimiChatResult{Content: "<tool_call>" + string(payload) + "</tool_call>", ActualModel: targetModel}
 	} else if call, ok := synthesizeKimiInitialSkillDiscovery(input.Messages, input.Tools); agentMode && ok {
@@ -1298,6 +1301,110 @@ func synthesizeKimiSkillReadFollowup(messages []models.Message, tools []models.T
 	return models.ToolCall{}, false
 }
 
+func synthesizeKimiSkillViewFollowup(messages []models.Message, tools []models.Tool) (models.ToolCall, bool) {
+	var skillViewTool *models.Tool
+	for i := range tools {
+		if strings.EqualFold(strings.TrimSpace(tools[i].Function.Name), "skill_view") {
+			skillViewTool = &tools[i]
+			break
+		}
+	}
+	if skillViewTool == nil {
+		return models.ToolCall{}, false
+	}
+
+	type listedSkill struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Category    string `json:"category"`
+	}
+	listed := make([]listedSkill, 0)
+	viewed := map[string]bool{}
+	userText := ""
+	for _, message := range messages {
+		if message.Role == "user" {
+			userText += " " + strings.ToLower(services.ExtractText(message.Content, false))
+		}
+		if message.Role == "assistant" {
+			for _, call := range message.ToolCalls {
+				if !strings.EqualFold(strings.TrimSpace(call.Function.Name), "skill_view") {
+					continue
+				}
+				var args map[string]interface{}
+				if json.Unmarshal([]byte(call.Function.Arguments), &args) == nil {
+					if name, _ := args["name"].(string); strings.TrimSpace(name) != "" {
+						viewed[strings.ToLower(strings.TrimSpace(name))] = true
+					}
+				}
+			}
+		}
+		if message.Role != "tool" && message.Role != "function" {
+			continue
+		}
+		text := strings.TrimSpace(services.ExtractText(message.Content, false))
+		var payload struct {
+			Skills []listedSkill `json:"skills"`
+		}
+		if json.Unmarshal([]byte(text), &payload) == nil && len(payload.Skills) > 0 {
+			listed = append(listed, payload.Skills...)
+		}
+	}
+	if len(listed) == 0 {
+		return models.ToolCall{}, false
+	}
+
+	keywords := make([]string, 0)
+	ignoredKeywords := map[string]bool{
+		"google": true, "skill": true, "skills": true, "credenciais": true, "credentials": true,
+		"minhas": true, "using": true, "usando": true, "utilize": true, "criar": true,
+	}
+	for _, raw := range strings.FieldsFunc(userText, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	}) {
+		if len(raw) >= 4 && !ignoredKeywords[raw] {
+			keywords = append(keywords, raw)
+		}
+	}
+	bestIndex, bestScore := -1, 0
+	for i, skill := range listed {
+		name := strings.ToLower(strings.TrimSpace(skill.Name))
+		if name == "" || viewed[name] {
+			continue
+		}
+		haystack := strings.ToLower(strings.Join([]string{skill.Name, skill.Description, skill.Category}, " "))
+		score := 0
+		for _, keyword := range keywords {
+			if strings.Contains(haystack, keyword) {
+				score++
+			}
+		}
+		for _, priority := range []string{"docs", "slides", "drive", "document", "presentation"} {
+			if strings.Contains(userText, priority) && strings.Contains(haystack, priority) {
+				score += 3
+			}
+		}
+		if score > bestScore {
+			bestIndex, bestScore = i, score
+		}
+	}
+	if bestIndex < 0 {
+		return models.ToolCall{}, false
+	}
+
+	arguments := map[string]interface{}{"name": listed[bestIndex].Name}
+	parameters, _ := skillViewTool.Function.Parameters.(map[string]interface{})
+	if required, ok := parameters["required"].([]interface{}); ok {
+		for _, rawName := range required {
+			name, _ := rawName.(string)
+			if name != "name" {
+				return models.ToolCall{}, false
+			}
+		}
+	}
+	encoded, _ := json.Marshal(arguments)
+	return models.ToolCall{Type: "function", Function: models.ToolFunction{Name: skillViewTool.Function.Name, Arguments: string(encoded)}}, true
+}
+
 func synthesizeKimiInitialSkillDiscovery(messages []models.Message, tools []models.Tool) (models.ToolCall, bool) {
 	latestUserText := ""
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -1321,6 +1428,16 @@ func synthesizeKimiInitialSkillDiscovery(messages []models.Message, tools []mode
 	}
 	if !requestedUse {
 		return models.ToolCall{}, false
+	}
+	for _, tool := range tools {
+		if !strings.EqualFold(strings.TrimSpace(tool.Function.Name), "skills_list") {
+			continue
+		}
+		parameters, _ := tool.Function.Parameters.(map[string]interface{})
+		required, _ := parameters["required"].([]interface{})
+		if len(required) == 0 {
+			return models.ToolCall{Type: "function", Function: models.ToolFunction{Name: tool.Function.Name, Arguments: "{}"}}, true
+		}
 	}
 	return synthesizeKimiReadOnlyDiscoveryToolCall(tools)
 }

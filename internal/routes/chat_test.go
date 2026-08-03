@@ -359,6 +359,31 @@ func TestSynthesizeKimiInitialSkillDiscovery(t *testing.T) {
 	}
 }
 
+func TestSynthesizeKimiInitialSkillDiscoveryPrefersHermesSkillsList(t *testing.T) {
+	messages := []models.Message{{Role: "user", Content: "Use minhas skills e credenciais do Google Docs."}}
+	tools := []models.Tool{
+		{Type: "function", Function: models.ToolDefinition{Name: "terminal", Parameters: map[string]interface{}{"properties": map[string]interface{}{"command": map[string]interface{}{}}, "required": []interface{}{"command"}}}},
+		{Type: "function", Function: models.ToolDefinition{Name: "skills_list", Parameters: map[string]interface{}{"properties": map[string]interface{}{}, "required": []interface{}{}}}},
+	}
+	call, ok := synthesizeKimiInitialSkillDiscovery(messages, tools)
+	if !ok || call.Function.Name != "skills_list" || call.Function.Arguments != "{}" {
+		t.Fatalf("unexpected Hermes skill bootstrap: %+v, ok=%v", call, ok)
+	}
+}
+
+func TestSynthesizeKimiSkillViewFollowupPrioritizesRelevantUnreadSkills(t *testing.T) {
+	messages := []models.Message{
+		{Role: "user", Content: "Crie no Google Docs e Google Slides usando minhas skills."},
+		{Role: "tool", Content: `{"success":true,"skills":[{"name":"unrelated","description":"Other workflow"},{"name":"google-docs","description":"Create Google documents"},{"name":"google-slides","description":"Create Google presentations"}]}`},
+		{Role: "assistant", ToolCalls: []models.ToolCall{{Function: models.ToolFunction{Name: "skill_view", Arguments: `{"name":"google-docs"}`}}}},
+	}
+	tools := []models.Tool{{Type: "function", Function: models.ToolDefinition{Name: "skill_view", Parameters: map[string]interface{}{"properties": map[string]interface{}{"name": map[string]interface{}{}}, "required": []interface{}{"name"}}}}}
+	call, ok := synthesizeKimiSkillViewFollowup(messages, tools)
+	if !ok || call.Function.Name != "skill_view" || !strings.Contains(call.Function.Arguments, "google-slides") {
+		t.Fatalf("unexpected skill_view followup: %+v, ok=%v", call, ok)
+	}
+}
+
 func TestKimiAgentInstructionsDeclareHostToolsAsReal(t *testing.T) {
 	instructions := kimiAgentAdapterInstructions()
 	for _, required := range []string{"Hermes Agent", "Kilo Code", "skills", "credentials", "<tool_call>"} {

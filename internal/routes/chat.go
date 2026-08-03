@@ -1030,13 +1030,17 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 		customHeaders[strings.ToLower(k)] = v[0]
 	}
 
+	agentMode := len(input.Tools) > 0
 	sessionHandle := strings.TrimSpace(input.User)
 	if sessionHandle == "" {
 		sessionHandle = services.GenerateFingerprint(input.Messages)
 	}
 
 	sessionID := ""
-	if sessionHandle != "" {
+	// Agent clients resend the full OpenAI transcript after every tool result.
+	// Reusing the same Web chat would duplicate that transcript and corrupt the
+	// Expert-mode branch, so each external agent turn starts a clean Web session.
+	if sessionHandle != "" && !agentMode {
 		if cached, found := services.GlobalCache.Get("deepseek_session_" + sessionHandle); found {
 			if s, ok := cached.(string); ok {
 				sessionID = s
@@ -1050,13 +1054,12 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 			utils.SendError(c, upstreamFailureStatus, "Failed to create DeepSeek chat session: "+err.Error(), "server_error", nil)
 			return
 		}
-		if sessionHandle != "" {
+		if sessionHandle != "" && !agentMode {
 			services.GlobalCache.Set("deepseek_session_"+sessionHandle, sessionID, 55*time.Minute)
 		}
 	}
 
 	toolChoice := resolveToolChoice(input.ToolChoice)
-	agentMode := len(input.Tools) > 0
 	if agentMode {
 		input.Messages = utils.TrimMessagesForProxy(input.Messages, utils.ContextLimitsFromEnv(true))
 	}
@@ -1111,8 +1114,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	toolCalls = finalizeToolCalls(toolCalls)
 	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
 	if len(toolCalls) > 0 {
-		result.Content = ""
-		result.ReasoningText = ""
+		result = prepareDeepSeekToolCallResult(result)
 		storePendingToolCalls(sessionHandle, toolCalls)
 	}
 
@@ -1128,6 +1130,15 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result, responseCalls)
 	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	c.JSON(http.StatusOK, response)
+}
+
+// Thinking-mode DeepSeek models require reasoning_content to be replayed with
+// an assistant tool-call message on subsequent turns. Clear only the XML bridge
+// content; preserving reasoning keeps Hermes and other OpenAI clients capable
+// of continuing the tool loop.
+func prepareDeepSeekToolCallResult(result models.DeepSeekChatResult) models.DeepSeekChatResult {
+	result.Content = ""
+	return result
 }
 
 // recoverDeepSeekAgentToolCall prevents an agent turn from ending in a promise

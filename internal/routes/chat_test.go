@@ -235,3 +235,17 @@ func TestDeepSeekThinkingEnabledForCurrentOfficialModels(t *testing.T) {
 		t.Fatal("Pro should use Web Expert thinking mode")
 	}
 }
+
+func TestPrepareDeepSeekToolCallResultPreservesReasoning(t *testing.T) {
+	result := prepareDeepSeekToolCallResult(models.DeepSeekChatResult{
+		Content:       `<tool_call>{"name":"terminal","arguments":{"command":"pwd"}}</tool_call>`,
+		ReasoningText: "preciso inspecionar o diretório antes de continuar",
+	})
+
+	if result.Content != "" {
+		t.Fatalf("tool bridge content should be cleared, got %q", result.Content)
+	}
+	if result.ReasoningText != "preciso inspecionar o diretório antes de continuar" {
+		t.Fatalf("reasoning_content must survive tool calls, got %q", result.ReasoningText)
+	}
+}

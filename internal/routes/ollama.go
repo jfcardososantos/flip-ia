@@ -435,9 +435,10 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 		customHeaders[strings.ToLower(k)] = v[0]
 	}
 
+	agentMode := len(spec.Tools) > 0
 	sessionHandle := services.GenerateFingerprint(spec.Messages)
 	sessionID := ""
-	if sessionHandle != "" {
+	if sessionHandle != "" && !agentMode {
 		if cached, found := services.GlobalCache.Get("deepseek_session_" + sessionHandle); found {
 			if s, ok := cached.(string); ok {
 				sessionID = s
@@ -450,13 +451,12 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 			writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to create DeepSeek chat session: "+err.Error())
 			return
 		}
-		if sessionHandle != "" {
+		if sessionHandle != "" && !agentMode {
 			services.GlobalCache.Set("deepseek_session_"+sessionHandle, sessionID, 55*time.Minute)
 		}
 	}
 
 	toolChoice := "auto"
-	agentMode := len(spec.Tools) > 0
 	if agentMode {
 		spec.Messages = utils.TrimMessagesForProxy(spec.Messages, utils.ContextLimitsFromEnv(true))
 	}
@@ -499,8 +499,7 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 	cleanText, toolCalls := utils.ParseToolCalls(result.Content)
 	toolCalls = finalizeToolCalls(toolCalls)
 	if len(toolCalls) > 0 {
-		result.Content = ""
-		result.ReasoningText = ""
+		result = prepareDeepSeekToolCallResult(result)
 		storePendingToolCalls(sessionHandle, toolCalls)
 	} else {
 		result.Content = cleanText

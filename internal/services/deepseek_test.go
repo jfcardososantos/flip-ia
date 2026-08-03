@@ -18,6 +18,32 @@ func TestParseDeepSeekDataSkipsFinishedStatus(t *testing.T) {
 	}
 }
 
+func TestParseDeepSeekDataReadsExpertOpenAIDeltas(t *testing.T) {
+	result := models.DeepSeekChatResult{}
+
+	parseDeepSeekData(`{"id":"expert_msg_1","choices":[{"delta":{"reasoning_content":"analisando "}}]}`, &result)
+	parseDeepSeekData(`{"choices":[{"delta":{"content":"resposta"}}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`, &result)
+
+	if result.MessageID != "expert_msg_1" {
+		t.Fatalf("unexpected message id: %q", result.MessageID)
+	}
+	if result.ReasoningText != "analisando " || result.Content != "resposta" {
+		t.Fatalf("unexpected expert result: %+v", result)
+	}
+	if result.Usage.TotalTokens != 14 {
+		t.Fatalf("unexpected usage: %+v", result.Usage)
+	}
+}
+
+func TestParseDeepSeekDataTreatsReasoningPathAsReasoning(t *testing.T) {
+	result := models.DeepSeekChatResult{}
+	parseDeepSeekData(`{"p":"response/reasoning_content","v":"pensando"}`, &result)
+
+	if result.ReasoningText != "pensando" || result.Content != "" {
+		t.Fatalf("unexpected reasoning-path result: %+v", result)
+	}
+}
+
 func TestParseDeepSeekDataSkipsStatusText(t *testing.T) {
 	result := models.DeepSeekChatResult{}
 

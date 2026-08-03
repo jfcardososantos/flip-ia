@@ -200,7 +200,7 @@ func ParseDeepSeekStream(body io.Reader) models.DeepSeekChatResult {
 	}
 
 	if result.Usage.TotalTokens == 0 {
-		result.Usage.CompletionTokens = len(result.Content) / 4
+		result.Usage.CompletionTokens = len(result.Content+result.ReasoningText) / 4
 		result.Usage.TotalTokens = result.Usage.CompletionTokens
 	}
 	return result
@@ -226,6 +226,9 @@ func parseDeepSeekData(dataStr string, result *models.DeepSeekChatResult) {
 
 	var chunk map[string]interface{}
 	if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+		return
+	}
+	if parseDeepSeekOpenAIChunk(chunk, result) {
 		return
 	}
 
@@ -254,11 +257,58 @@ func parseDeepSeekData(dataStr string, result *models.DeepSeekChatResult) {
 	if cleanText == "FINISHED" || cleanText == "RESPONSE_FINISHED" || strings.Contains(lowerPath, "status") {
 		return
 	}
-	if strings.Contains(lowerPath, "thinking") {
+	if strings.Contains(lowerPath, "thinking") || strings.Contains(lowerPath, "reasoning") || strings.Contains(lowerPath, "analysis") {
 		result.ReasoningText += text
 		return
 	}
 	result.Content += text
+}
+
+// Expert Mode may return OpenAI-shaped SSE deltas instead of the p/v patch
+// frames used by the default Web mode. Accept both so reasoning-only chunks do
+// not get mistaken for empty output.
+func parseDeepSeekOpenAIChunk(chunk map[string]interface{}, result *models.DeepSeekChatResult) bool {
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok {
+		return false
+	}
+	if id, ok := chunk["id"].(string); ok && id != "" {
+		result.MessageID = id
+	}
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]interface{})
+		for _, field := range []string{"delta", "message"} {
+			part, _ := choice[field].(map[string]interface{})
+			if part == nil {
+				continue
+			}
+			for _, key := range []string{"reasoning_content", "reasoning", "thinking_content", "analysis"} {
+				if text := deepSeekTextValue(part[key]); text != "" {
+					result.ReasoningText += text
+				}
+			}
+			if text := deepSeekTextValue(part["content"]); text != "" {
+				result.Content += text
+			}
+		}
+	}
+	if usage, ok := chunk["usage"].(map[string]interface{}); ok {
+		result.Usage.PromptTokens = deepSeekIntValue(usage["prompt_tokens"])
+		result.Usage.CompletionTokens = deepSeekIntValue(usage["completion_tokens"])
+		result.Usage.TotalTokens = deepSeekIntValue(usage["total_tokens"])
+	}
+	return true
+}
+
+func deepSeekIntValue(value interface{}) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	}
+	return 0
 }
 
 func deepSeekTextValue(value interface{}) string {
@@ -280,7 +330,7 @@ func deepSeekTextValue(value interface{}) string {
 		}
 		return sb.String()
 	case map[string]interface{}:
-		for _, key := range []string{"content", "text", "delta"} {
+		for _, key := range []string{"content", "text", "delta", "reasoning_content", "reasoning", "thinking_content", "analysis"} {
 			if text, ok := v[key].(string); ok {
 				return text
 			}

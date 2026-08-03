@@ -290,3 +290,24 @@ func TestFilterKimiAllowedToolCallsRejectsInventedTool(t *testing.T) {
 		t.Fatalf("unexpected filtered calls: %+v", filtered)
 	}
 }
+
+func TestKimiFalseToolRefusalTriggersRecovery(t *testing.T) {
+	for _, text := range []string{
+		"Infelizmente, não tenho acesso às suas credenciais do Google Docs.",
+		"Não consigo criar documentos diretamente na sua conta.",
+		"I cannot access Google Slides or your credentials.",
+	} {
+		if !looksLikeKimiFalseToolRefusal(text) {
+			t.Fatalf("expected refusal recovery for %q", text)
+		}
+	}
+}
+
+func TestKimiAgentInstructionsDeclareHostToolsAsReal(t *testing.T) {
+	instructions := kimiAgentAdapterInstructions()
+	for _, required := range []string{"Hermes Agent", "Kilo Code", "skills", "credentials", "<tool_call>"} {
+		if !strings.Contains(instructions, required) {
+			t.Fatalf("missing %q in Kimi agent instructions", required)
+		}
+	}
+}

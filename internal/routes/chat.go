@@ -991,12 +991,13 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 	toolChoice := resolveToolChoice(input.ToolChoice)
 	if agentMode {
 		toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
+		toolInstructions += kimiAgentAdapterInstructions()
 		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
 	}
 	outcome := awaitKimiBufferedResult(c, input.Stream, func() kimiBufferedOutcome {
 		result, chatErr := services.KimiChat(session, accessToken, targetModel, messages)
 		if chatErr == nil && agentMode {
-			result = recoverKimiAgentToolCall(result, session, accessToken, messages, toolChoice, completionID, input.Tools)
+			result, chatErr = recoverKimiAgentToolCall(result, session, accessToken, messages, toolChoice, completionID, input.Tools)
 		}
 		return kimiBufferedOutcome{result: result, err: chatErr}
 	})
@@ -1017,6 +1018,9 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 		c.Header("X-Mimo-Upstream-Fallback", result.ActualModel)
 	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)
+	if agentMode {
+		toolCalls = filterKimiAllowedToolCalls(toolCalls, input.Tools, toolChoice)
+	}
 	toolCalls = finalizeToolCalls(toolCalls)
 	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
 	if len(toolCalls) > 0 {
@@ -1068,14 +1072,29 @@ func awaitKimiBufferedResult(c *gin.Context, stream bool, job func() kimiBuffere
 	}
 }
 
-func recoverKimiAgentToolCall(first services.KimiChatResult, session services.StoredWebSession, accessToken string, messages []models.Message, toolChoice, completionID string, tools []models.Tool) services.KimiChatResult {
+func kimiAgentAdapterInstructions() string {
+	return `
+
+## Kimi adapter — tools are real
+- You are running inside Hermes Agent or an IDE agent such as Kilo Code. Every tool listed above is real and is executed by the host after you emit its XML call.
+- Never claim that you cannot access tools, files, credentials, skills, Google Docs, Google Slides, a terminal, or the browser merely because you cannot access them directly inside the language model. Use the matching host tool.
+- When the user says a skill or credentials are already configured, treat that as authorization and use the available tools to inspect and invoke them. Do not ask the user to copy and paste content first.
+- For a requested external action, respond with exactly one valid <tool_call> block and wait for its result. Do not replace execution with instructions, sample code, or a refusal.
+- Tool names must exactly match the names listed above. Never invent tools such as ipython, python, browser, or shell unless that exact name is listed.
+`
+}
+
+func recoverKimiAgentToolCall(first services.KimiChatResult, session services.StoredWebSession, accessToken string, messages []models.Message, toolChoice, completionID string, tools []models.Tool) (services.KimiChatResult, error) {
 	result := first
-	for attempt := 0; attempt < 2; attempt++ {
-		_, calls := utils.ParseToolCalls(result.Content)
+	for attempt := 0; attempt < 1; attempt++ {
+		clean, calls := utils.ParseToolCalls(result.Content)
 		calls = filterKimiAllowedToolCalls(calls, tools, toolChoice)
-		parsed := parsedMimoChat{CleanText: result.Content, ReasoningText: result.ReasoningText, ToolCalls: calls}
-		if !shouldRetryAgentToolCall(parsed, toolChoice) {
-			return result
+		if clean == "" && len(calls) == 0 {
+			clean = result.Content
+		}
+		parsed := parsedMimoChat{CleanText: clean, ReasoningText: result.ReasoningText, ToolCalls: calls}
+		if !shouldRetryKimiAgentToolCall(parsed, toolChoice) {
+			return result, nil
 		}
 
 		retryMessages := append([]models.Message{}, messages...)
@@ -1090,16 +1109,54 @@ func recoverKimiAgentToolCall(first services.KimiChatResult, session services.St
 		next, err := services.KimiChat(session, accessToken, retryModel, retryMessages)
 		if err != nil {
 			fmt.Printf("[%s] Kimi agent recovery failed: %v\n", completionID, err)
-			break
+			return result, err
 		}
 		result = next
 	}
 
+	clean, calls := utils.ParseToolCalls(result.Content)
+	calls = filterKimiAllowedToolCalls(calls, tools, toolChoice)
+	if len(calls) > 0 {
+		return result, nil
+	}
 	if call, ok := synthesizeRequiredZeroArgumentToolCall(toolChoice, tools); ok {
 		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
 		result.Content = "<tool_call>" + string(payload) + "</tool_call>"
+		return result, nil
 	}
-	return result
+	if clean == "" {
+		clean = result.Content
+	}
+	parsed := parsedMimoChat{CleanText: clean, ReasoningText: result.ReasoningText}
+	if shouldRetryKimiAgentToolCall(parsed, toolChoice) {
+		return result, fmt.Errorf("Kimi did not emit an authorized tool call after agent recovery")
+	}
+	return result, nil
+}
+
+func shouldRetryKimiAgentToolCall(result parsedMimoChat, toolChoice string) bool {
+	return shouldRetryAgentToolCall(result, toolChoice) || looksLikeKimiFalseToolRefusal(result.CleanText)
+}
+
+func looksLikeKimiFalseToolRefusal(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"não tenho acesso", "nao tenho acesso", "não consigo acessar", "nao consigo acessar",
+		"não consigo criar", "nao consigo criar", "não posso criar", "nao posso criar",
+		"não tenho a ferramenta", "nao tenho a ferramenta", "ferramenta disponível", "ferramenta disponivel",
+		"não consigo editar", "nao consigo editar", "não consigo sincronizar", "nao consigo sincronizar",
+		"i don't have access", "i do not have access", "i cannot access", "i can't access",
+		"i don't have the tool", "i do not have the tool", "i cannot create", "i can't create",
+		"unable to access", "no access to credentials", "cannot directly access",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func filterKimiAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolChoice string) []models.ToolCall {

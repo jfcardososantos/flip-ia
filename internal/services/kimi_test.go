@@ -134,7 +134,7 @@ func TestKimiWebRequestTimeoutConfiguration(t *testing.T) {
 		t.Fatalf("unexpected configured timeout: %s", got)
 	}
 	t.Setenv("KIMI_WEB_REQUEST_TIMEOUT", "invalid")
-	if got := kimiWebRequestTimeout(); got.String() != "45s" {
+	if got := kimiWebRequestTimeout(); got.String() != "1m0s" {
 		t.Fatalf("unexpected default timeout: %s", got)
 	}
 }

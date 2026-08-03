@@ -253,7 +253,7 @@ func kimiWebRequestTimeout() time.Duration {
 			return parsed
 		}
 	}
-	return 45 * time.Second
+	return 60 * time.Second
 }
 
 func kimiConnectFrame(payload []byte) []byte {

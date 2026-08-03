@@ -221,6 +221,9 @@ func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 		if block == nil {
 			continue
 		}
+		if mask == "block.exception" {
+			return result, kimiBlockExceptionError(block)
+		}
 		if op == "set" && mask == "block.text" {
 			result.Content += kimiBlockContent(block, "text")
 		}
@@ -241,6 +244,26 @@ func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 		return result, nil
 	}
 	return result, kimiEmptyResponseWithShapes(frameShapes)
+}
+
+func kimiBlockExceptionError(block map[string]interface{}) error {
+	detail := map[string]interface{}{}
+	for _, key := range []string{"exception", "error"} {
+		if value, exists := block[key]; exists && value != nil {
+			detail[key] = value
+		}
+	}
+	if len(detail) == 0 {
+		return errors.New("Kimi K3 returned an exception block")
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		return errors.New("Kimi K3 returned an unreadable exception block")
+	}
+	if len(encoded) > 1200 {
+		encoded = encoded[:1200]
+	}
+	return fmt.Errorf("Kimi K3 exception: %s", encoded)
 }
 
 func kimiEmptyResponseWithShapes(shapes []string) error {

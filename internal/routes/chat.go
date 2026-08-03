@@ -995,7 +995,8 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 	}
 	result, err := services.KimiChat(session, accessToken, targetModel, messages)
 	if err != nil {
-		utils.SendError(c, http.StatusBadGateway, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
+		c.Header("Retry-After", "1")
+		utils.SendError(c, http.StatusTooManyRequests, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
 		return
 	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)

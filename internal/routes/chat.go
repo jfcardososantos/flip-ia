@@ -998,6 +998,9 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 	if call, ok := synthesizeKimiSkillReadFollowup(input.Messages, input.Tools); agentMode && ok {
 		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
 		outcome.result = services.KimiChatResult{Content: "<tool_call>" + string(payload) + "</tool_call>", ActualModel: targetModel}
+	} else if call, ok := synthesizeKimiInitialSkillDiscovery(input.Messages, input.Tools); agentMode && ok {
+		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
+		outcome.result = services.KimiChatResult{Content: "<tool_call>" + string(payload) + "</tool_call>", ActualModel: targetModel}
 	} else {
 		outcome = awaitKimiBufferedResult(c, input.Stream, func() kimiBufferedOutcome {
 			result, chatErr := services.KimiChat(session, accessToken, targetModel, messages)
@@ -1192,9 +1195,9 @@ func synthesizeKimiReadOnlyDiscoveryToolCall(tools []models.Tool) (models.ToolCa
 			properties, _ := parameters["properties"].(map[string]interface{})
 			arguments := map[string]interface{}{}
 			if _, ok := properties["command"]; ok {
-				arguments["command"] = `pwd; find . -maxdepth 5 -type f \( -iname '*skill*' -o -iname '*google*' -o -iname '*docs*' -o -iname '*slides*' \) 2>/dev/null | head -200`
+				arguments["command"] = `pwd; find . "$HOME/.hermes" "$HOME/.config/hermes" "$HOME/.agents" "$HOME/.codex" -maxdepth 6 -type f \( -iname 'SKILL.md' -o -iname '*google*' -o -iname '*docs*' -o -iname '*slides*' \) 2>/dev/null | head -200`
 			} else if _, ok := properties["code"]; ok {
-				arguments["code"] = "import os\nfor root, dirs, files in os.walk('.'):\n    if root.count(os.sep) > 5:\n        dirs[:] = []\n        continue\n    for name in files:\n        low = name.lower()\n        if any(term in low for term in ('skill', 'google', 'docs', 'slides')):\n            print(os.path.join(root, name))"
+				arguments["code"] = "import os\nroots = ['.', '~/.hermes', '~/.config/hermes', '~/.agents', '~/.codex']\nfor start in roots:\n    start = os.path.expanduser(start)\n    if not os.path.isdir(start):\n        continue\n    base_depth = start.count(os.sep)\n    for root, dirs, files in os.walk(start):\n        if root.count(os.sep) - base_depth > 6:\n            dirs[:] = []\n            continue\n        for name in files:\n            low = name.lower()\n            if low == 'skill.md' or any(term in low for term in ('google', 'docs', 'slides')):\n                print(os.path.join(root, name))"
 			} else {
 				continue
 			}
@@ -1225,6 +1228,7 @@ func synthesizeKimiReadOnlyDiscoveryToolCall(tools []models.Tool) (models.ToolCa
 
 func synthesizeKimiSkillReadFollowup(messages []models.Message, tools []models.Tool) (models.ToolCall, bool) {
 	path := ""
+	bestScore := -1
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role != "tool" && messages[i].Role != "function" {
 			continue
@@ -1233,8 +1237,17 @@ func synthesizeKimiSkillReadFollowup(messages []models.Message, tools []models.T
 			candidate := strings.Trim(strings.TrimSpace(line), "`\"'")
 			candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "- "))
 			if strings.HasSuffix(strings.ToLower(candidate), "skill.md") && !strings.ContainsAny(candidate, "\x00\r") {
-				path = candidate
-				break
+				score := 0
+				lowerCandidate := strings.ToLower(candidate)
+				for _, marker := range []string{"google", "docs", "slides", "drive"} {
+					if strings.Contains(lowerCandidate, marker) {
+						score++
+					}
+				}
+				if score > bestScore {
+					path = candidate
+					bestScore = score
+				}
 			}
 		}
 		break
@@ -1283,6 +1296,33 @@ func synthesizeKimiSkillReadFollowup(messages []models.Message, tools []models.T
 		}
 	}
 	return models.ToolCall{}, false
+}
+
+func synthesizeKimiInitialSkillDiscovery(messages []models.Message, tools []models.Tool) (models.ToolCall, bool) {
+	latestUserText := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "tool" || messages[i].Role == "function" {
+			return models.ToolCall{}, false
+		}
+		if messages[i].Role == "user" {
+			latestUserText = strings.ToLower(strings.TrimSpace(services.ExtractText(messages[i].Content, false)))
+			break
+		}
+	}
+	if latestUserText == "" || (!strings.Contains(latestUserText, "skill") && !strings.Contains(latestUserText, "credencia") && !strings.Contains(latestUserText, "credential")) {
+		return models.ToolCall{}, false
+	}
+	requestedUse := false
+	for _, marker := range []string{"utilize", "usar", "use ", "acesse", "access", "execute", "crie", "criar", "create"} {
+		if strings.Contains(latestUserText, marker) {
+			requestedUse = true
+			break
+		}
+	}
+	if !requestedUse {
+		return models.ToolCall{}, false
+	}
+	return synthesizeKimiReadOnlyDiscoveryToolCall(tools)
 }
 
 func filterKimiAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolChoice string) []models.ToolCall {

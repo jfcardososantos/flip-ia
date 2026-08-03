@@ -324,7 +324,7 @@ func TestSynthesizeKimiReadOnlyDiscoveryUsesAuthorizedTerminal(t *testing.T) {
 }
 
 func TestSynthesizeKimiSkillReadFollowup(t *testing.T) {
-	messages := []models.Message{{Role: "tool", Content: "./skills/google-docs/SKILL.md\n./skills/google-slides/SKILL.md"}}
+	messages := []models.Message{{Role: "tool", Content: "./skills/unrelated/SKILL.md\n./skills/google-docs/SKILL.md\n./skills/google-slides/SKILL.md"}}
 	tools := []models.Tool{{
 		Type: "function",
 		Function: models.ToolDefinition{
@@ -338,6 +338,24 @@ func TestSynthesizeKimiSkillReadFollowup(t *testing.T) {
 	call, ok := synthesizeKimiSkillReadFollowup(messages, tools)
 	if !ok || call.Function.Name != "terminal" || !strings.Contains(call.Function.Arguments, "google-docs/SKILL.md") {
 		t.Fatalf("unexpected skill-read call: %+v, ok=%v", call, ok)
+	}
+}
+
+func TestSynthesizeKimiInitialSkillDiscovery(t *testing.T) {
+	messages := []models.Message{{Role: "user", Content: "Utilize as skills com minhas credenciais para criar no Google Docs."}}
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "terminal",
+			Parameters: map[string]interface{}{
+				"properties": map[string]interface{}{"command": map[string]interface{}{"type": "string"}},
+				"required":   []interface{}{"command"},
+			},
+		},
+	}}
+	call, ok := synthesizeKimiInitialSkillDiscovery(messages, tools)
+	if !ok || call.Function.Name != "terminal" || !strings.Contains(call.Function.Arguments, "find") {
+		t.Fatalf("unexpected initial skill-discovery call: %+v, ok=%v", call, ok)
 	}
 }
 

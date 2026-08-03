@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestParseKimiConnectStream(t *testing.T) {
@@ -152,5 +153,16 @@ func TestBuildKimiChatBodyDisablesThinkingForK2Fallback(t *testing.T) {
 	options, _ := payload["options"].(map[string]interface{})
 	if thinking, _ := options["thinking"].(bool); thinking {
 		t.Fatalf("K2 fallback must not force thinking: %s", body)
+	}
+}
+
+func TestKimiK3AttemptTimeoutConfiguration(t *testing.T) {
+	t.Setenv("KIMI_K3_ATTEMPT_TIMEOUT", "9s")
+	if got := kimiK3AttemptTimeout(); got != 9*time.Second {
+		t.Fatalf("unexpected K3 attempt timeout: %s", got)
+	}
+	t.Setenv("KIMI_K3_ATTEMPT_TIMEOUT", "1s")
+	if got := kimiK3AttemptTimeout(); got != 12*time.Second {
+		t.Fatalf("unexpected default K3 attempt timeout: %s", got)
 	}
 }

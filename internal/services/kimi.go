@@ -109,18 +109,29 @@ func KimiChat(session StoredWebSession, accessToken, model string, messages []mo
 	}
 
 	var lastErr error
+	skipRemainingK3 := false
 	for _, candidate := range kimiChatCandidates(model, modelConfig) {
+		if skipRemainingK3 && candidate.actualModel == "kimi-k3" {
+			continue
+		}
 		body, err := buildKimiChatBody(candidate.config, prompt, systemPrompt)
 		if err != nil {
 			return KimiChatResult{}, err
 		}
 		for attempt := 0; attempt < 2; attempt++ {
-			result, requestErr := sendKimiChatRequest(session, accessToken, body)
+			requestTimeout := kimiWebRequestTimeout()
+			if candidate.actualModel == "kimi-k3" && kimiK3AttemptTimeout() < requestTimeout {
+				requestTimeout = kimiK3AttemptTimeout()
+			}
+			result, requestErr := sendKimiChatRequestWithTimeout(session, accessToken, body, requestTimeout)
 			if requestErr == nil {
 				result.ActualModel = candidate.actualModel
 				return result, nil
 			}
 			lastErr = requestErr
+			if candidate.actualModel == "kimi-k3" && errors.Is(requestErr, context.DeadlineExceeded) {
+				skipRemainingK3 = true
+			}
 			if !errors.Is(requestErr, ErrKimiEmptyResponse) {
 				break
 			}
@@ -210,7 +221,10 @@ func buildKimiChatBody(modelConfig kimiWebModelConfig, prompt, systemPrompt stri
 }
 
 func sendKimiChatRequest(session StoredWebSession, accessToken string, body []byte) (KimiChatResult, error) {
-	requestTimeout := kimiWebRequestTimeout()
+	return sendKimiChatRequestWithTimeout(session, accessToken, body, kimiWebRequestTimeout())
+}
+
+func sendKimiChatRequestWithTimeout(session StoredWebSession, accessToken string, body []byte, requestTimeout time.Duration) (KimiChatResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kimiWebChatURL, bytes.NewReader(kimiConnectFrame(body)))
@@ -255,6 +269,16 @@ func kimiWebRequestTimeout() time.Duration {
 		}
 	}
 	return 60 * time.Second
+}
+
+func kimiK3AttemptTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("KIMI_K3_ATTEMPT_TIMEOUT"))
+	if value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil && parsed >= 5*time.Second && parsed <= 45*time.Second {
+			return parsed
+		}
+	}
+	return 12 * time.Second
 }
 
 func kimiConnectFrame(payload []byte) []byte {

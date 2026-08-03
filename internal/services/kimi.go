@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"flip-ai/internal/models"
@@ -186,6 +187,7 @@ func kimiConnectFrame(payload []byte) []byte {
 
 func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 	var result KimiChatResult
+	frameShapes := make([]string, 0, 12)
 	for len(raw) > 0 {
 		if len(raw) < 5 {
 			return KimiChatResult{}, errors.New("truncated Kimi Connect frame")
@@ -206,13 +208,16 @@ func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 				return KimiChatResult{}, streamErr
 			}
 			if strings.TrimSpace(result.Content) == "" {
-				return result, ErrKimiEmptyResponse
+				return result, kimiEmptyResponseWithShapes(frameShapes)
 			}
 			return result, nil
 		}
 		op, _ := event["op"].(string)
 		mask, _ := event["mask"].(string)
 		block, _ := event["block"].(map[string]interface{})
+		if len(frameShapes) < cap(frameShapes) {
+			frameShapes = append(frameShapes, kimiFrameShape(op, mask, event, block))
+		}
 		if block == nil {
 			continue
 		}
@@ -235,7 +240,29 @@ func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 	if strings.TrimSpace(result.Content) != "" {
 		return result, nil
 	}
-	return result, ErrKimiEmptyResponse
+	return result, kimiEmptyResponseWithShapes(frameShapes)
+}
+
+func kimiEmptyResponseWithShapes(shapes []string) error {
+	if len(shapes) == 0 {
+		return ErrKimiEmptyResponse
+	}
+	return fmt.Errorf("%w (frame shapes: %s)", ErrKimiEmptyResponse, strings.Join(shapes, "; "))
+}
+
+func kimiFrameShape(op, mask string, event, block map[string]interface{}) string {
+	eventKeys := sortedKimiKeys(event)
+	blockKeys := sortedKimiKeys(block)
+	return fmt.Sprintf("op=%q mask=%q keys=%s block=%s", op, mask, strings.Join(eventKeys, ","), strings.Join(blockKeys, ","))
+}
+
+func sortedKimiKeys(value map[string]interface{}) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Connect end-stream envelopes may legally contain no error, null, or an empty

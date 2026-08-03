@@ -988,15 +988,27 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 	}
 	agentMode := len(input.Tools) > 0
 	messages := append([]models.Message{}, input.Messages...)
+	toolChoice := resolveToolChoice(input.ToolChoice)
 	if agentMode {
-		toolChoice := resolveToolChoice(input.ToolChoice)
 		toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
 		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
 	}
-	result, err := services.KimiChat(session, accessToken, targetModel, messages)
-	if err != nil {
+	outcome := awaitKimiBufferedResult(c, input.Stream, func() kimiBufferedOutcome {
+		result, chatErr := services.KimiChat(session, accessToken, targetModel, messages)
+		if chatErr == nil && agentMode {
+			result = recoverKimiAgentToolCall(result, session, accessToken, messages, toolChoice, completionID, input.Tools)
+		}
+		return kimiBufferedOutcome{result: result, err: chatErr}
+	})
+	result := outcome.result
+	if outcome.err != nil {
 		c.Header("Retry-After", "1")
-		utils.SendError(c, http.StatusTooManyRequests, "Failed to call Kimi Web: "+err.Error(), "server_error", nil)
+		err = fmt.Errorf("Failed to call Kimi Web: %w", outcome.err)
+		if input.Stream && c.Writer.Written() {
+			sendDeepSeekBufferedError(c, true, err)
+		} else {
+			utils.SendError(c, http.StatusTooManyRequests, err.Error(), "server_error", nil)
+		}
 		return
 	}
 	responseModel := targetModel
@@ -1024,6 +1036,94 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 		services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+type kimiBufferedOutcome struct {
+	result services.KimiChatResult
+	err    error
+}
+
+func awaitKimiBufferedResult(c *gin.Context, stream bool, job func() kimiBufferedOutcome) kimiBufferedOutcome {
+	if !stream {
+		return job()
+	}
+	resultCh := make(chan kimiBufferedOutcome, 1)
+	go func() { resultCh <- job() }()
+	ticker := time.NewTicker(12 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-resultCh:
+			return result
+		case <-ticker.C:
+			c.Header("Content-Type", "text/event-stream; charset=utf-8")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			c.Header("X-Accel-Buffering", "no")
+			c.Writer.WriteString(": mimo keep-alive\n\n")
+			c.Writer.Flush()
+		case <-c.Request.Context().Done():
+			return kimiBufferedOutcome{err: c.Request.Context().Err()}
+		}
+	}
+}
+
+func recoverKimiAgentToolCall(first services.KimiChatResult, session services.StoredWebSession, accessToken string, messages []models.Message, toolChoice, completionID string, tools []models.Tool) services.KimiChatResult {
+	result := first
+	for attempt := 0; attempt < 2; attempt++ {
+		_, calls := utils.ParseToolCalls(result.Content)
+		parsed := parsedMimoChat{CleanText: result.Content, ReasoningText: result.ReasoningText, ToolCalls: calls}
+		if !shouldRetryAgentToolCall(parsed, toolChoice) {
+			return result
+		}
+
+		retryMessages := append([]models.Message{}, messages...)
+		if strings.TrimSpace(result.Content) != "" {
+			retryMessages = append(retryMessages, models.Message{Role: "assistant", Content: result.Content})
+		}
+		retryMessages = append(retryMessages, models.Message{Role: "user", Content: buildAgentToolRetryQuery("", parsed)})
+		retryModel := result.ActualModel
+		if retryModel == "" {
+			retryModel = "kimi-k3"
+		}
+		next, err := services.KimiChat(session, accessToken, retryModel, retryMessages)
+		if err != nil {
+			fmt.Printf("[%s] Kimi agent recovery failed: %v\n", completionID, err)
+			break
+		}
+		result = next
+	}
+
+	if call, ok := synthesizeRequiredZeroArgumentToolCall(toolChoice, tools); ok {
+		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
+		result.Content = "<tool_call>" + string(payload) + "</tool_call>"
+	}
+	return result
+}
+
+func synthesizeRequiredZeroArgumentToolCall(toolChoice string, tools []models.Tool) (models.ToolCall, bool) {
+	choice := strings.ToLower(strings.TrimSpace(toolChoice))
+	if choice == "" || choice == "auto" || choice == "none" {
+		return models.ToolCall{}, false
+	}
+	candidates := tools
+	if choice != "required" && choice != "any" {
+		candidates = nil
+		for _, tool := range tools {
+			if strings.EqualFold(tool.Function.Name, toolChoice) {
+				candidates = append(candidates, tool)
+			}
+		}
+	}
+	if len(candidates) != 1 {
+		return models.ToolCall{}, false
+	}
+	parameters, _ := candidates[0].Function.Parameters.(map[string]interface{})
+	required, _ := parameters["required"].([]interface{})
+	if len(required) > 0 {
+		return models.ToolCall{}, false
+	}
+	return models.ToolCall{Type: "function", Function: models.ToolFunction{Name: candidates[0].Function.Name, Arguments: "{}"}}, true
 }
 
 func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {

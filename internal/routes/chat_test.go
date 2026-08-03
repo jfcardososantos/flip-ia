@@ -249,3 +249,32 @@ func TestPrepareDeepSeekToolCallResultPreservesReasoning(t *testing.T) {
 		t.Fatalf("reasoning_content must survive tool calls, got %q", result.ReasoningText)
 	}
 }
+
+func TestSynthesizeRequiredZeroArgumentToolCall(t *testing.T) {
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name:       "get_current_time",
+			Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+		},
+	}}
+	call, ok := synthesizeRequiredZeroArgumentToolCall("required", tools)
+	if !ok || call.Function.Name != "get_current_time" || call.Function.Arguments != "{}" {
+		t.Fatalf("unexpected synthesized tool call: %+v, ok=%v", call, ok)
+	}
+}
+
+func TestSynthesizeRequiredToolCallRejectsRequiredArguments(t *testing.T) {
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "search",
+			Parameters: map[string]interface{}{
+				"type": "object", "required": []interface{}{"query"},
+			},
+		},
+	}}
+	if _, ok := synthesizeRequiredZeroArgumentToolCall("required", tools); ok {
+		t.Fatal("must not invent arguments for a tool with required parameters")
+	}
+}

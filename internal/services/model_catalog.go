@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,6 +115,7 @@ func RefreshModelCatalog(ctx context.Context) error {
 	defer modelCatalogRefreshMu.Unlock()
 
 	discoverers := []func(context.Context) catalogDiscoveryResult{
+		discoverDeepSeekModels,
 		discoverQwenModels,
 		discoverOpenRouterModels,
 		discoverGeminiModels,
@@ -227,6 +229,10 @@ func QwenWebModels() []map[string]interface{} {
 	return CatalogModelsForProviders("qwen")
 }
 
+func DeepSeekWebModels() []map[string]interface{} {
+	return CatalogModelsForProviders("deepseek")
+}
+
 func XiaomiCatalogModels() []map[string]interface{} {
 	return CatalogModelsForProviders("xiaomi")
 }
@@ -326,15 +332,76 @@ func fallbackModelCatalog() ModelCatalogSnapshot {
 		{ID: "qwen-web/qwen3.8-max-preview", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
 		{ID: "qwen-web/qwen3.7-max", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
 		{ID: "qwen-web/qwen3.6-plus", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
+		{ID: "deepseek-v4-flash", Provider: "deepseek", OwnedBy: "deepseek", Description: "DeepSeek official model via Web Instant mode", ContextLength: 1000000},
+		{ID: "deepseek-v4-pro", Provider: "deepseek", OwnedBy: "deepseek", Description: "DeepSeek official model via Web Expert mode", ContextLength: 1000000},
 	}
 	providers := make(map[string]ModelProviderStatus)
-	for _, provider := range []string{"xiaomi", "gemini", "groq", "openrouter", "cloudflare", "qwen"} {
+	for _, provider := range []string{"xiaomi", "gemini", "groq", "openrouter", "cloudflare", "qwen", "deepseek"} {
 		providers[provider] = ModelProviderStatus{Count: countCatalogProvider(models, provider), Source: "fallback"}
 	}
 	qwenStatus := providers["qwen"]
 	qwenStatus.DefaultModel = "qwen3.7-plus"
 	providers["qwen"] = qwenStatus
 	return normalizeCatalog(ModelCatalogSnapshot{Models: models, Providers: providers})
+}
+
+var (
+	deepSeekOfficialModelRegex = regexp.MustCompile(`(?i)\bdeepseek-[a-z0-9][a-z0-9._-]*`)
+	deepSeekModelRowRegex      = regexp.MustCompile(`(?is)<tr[^>]*>\s*<td[^>]*>\s*MODEL\s*</td>(.*?)</tr>`)
+)
+
+func discoverDeepSeekModels(ctx context.Context) catalogDiscoveryResult {
+	endpoint := qwenEnvOrDefault("DEEPSEEK_MODELS_URL", "https://api-docs.deepseek.com/quick_start/pricing/")
+	body, _, err := catalogGETBody(ctx, endpoint, map[string]string{"Accept": "text/html,application/xhtml+xml"})
+	if err != nil {
+		return catalogDiscoveryResult{provider: "deepseek", source: endpoint, err: err, attempted: true}
+	}
+
+	// Limit discovery to the MODEL row. This avoids treating model-version text
+	// (for example DeepSeek-V4-Flash-0731) or retired aliases as selectable IDs.
+	html := string(body)
+	row := deepSeekModelRowRegex.FindStringSubmatch(html)
+	if len(row) < 2 {
+		return catalogDiscoveryResult{
+			provider: "deepseek", source: endpoint, err: errors.New("official DeepSeek model table was not found"), attempted: true,
+		}
+	}
+	html = row[1]
+
+	seen := make(map[string]bool)
+	var models []CatalogModel
+	for _, raw := range deepSeekOfficialModelRegex.FindAllString(html, -1) {
+		id := strings.ToLower(strings.Trim(strings.TrimSpace(raw), "._-"))
+		if id == "" || id == "deepseek-chat" || id == "deepseek-reasoner" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		description := "DeepSeek model discovered from the official Models & Pricing page"
+		if strings.Contains(id, "-pro") {
+			description += "; routed through Web Expert mode"
+		} else {
+			description += "; routed through the current Web default mode"
+		}
+		models = append(models, CatalogModel{
+			ID: id, Provider: "deepseek", OwnedBy: "deepseek", Description: description,
+			ContextLength: 1000000, Dynamic: true,
+		})
+	}
+	return catalogDiscoveryResult{
+		provider: "deepseek", source: endpoint, defaultModel: firstDeepSeekDefault(models), models: models, attempted: true,
+	}
+}
+
+func firstDeepSeekDefault(models []CatalogModel) string {
+	for _, model := range models {
+		if strings.Contains(model.ID, "flash") {
+			return model.ID
+		}
+	}
+	if len(models) > 0 {
+		return models[0].ID
+	}
+	return ""
 }
 
 func discoverQwenModels(ctx context.Context) catalogDiscoveryResult {
@@ -561,9 +628,24 @@ func discoverXiaomiModels(ctx context.Context) catalogDiscoveryResult {
 }
 
 func catalogGET(ctx context.Context, endpoint string, headers map[string]string, target interface{}) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	body, contentType, err := catalogGETBody(ctx, endpoint, headers)
 	if err != nil {
 		return err
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		preview := strings.TrimSpace(string(body))
+		if len(preview) > 240 {
+			preview = preview[:240] + "..."
+		}
+		return fmt.Errorf("invalid JSON response (%s): %w; body=%q", contentType, err, preview)
+	}
+	return nil
+}
+
+func catalogGETBody(ctx context.Context, endpoint string, headers map[string]string) ([]byte, string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, "", err
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", firstNonEmpty(
@@ -577,25 +659,18 @@ func catalogGET(ctx context.Context, endpoint string, headers map[string]string,
 	}
 	response, err := GlobalHTTPClient.Do(request)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, response.Header.Get("Content-Type"), fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
 	if err != nil {
-		return err
+		return nil, response.Header.Get("Content-Type"), err
 	}
-	if err := json.Unmarshal(body, target); err != nil {
-		preview := strings.TrimSpace(string(body))
-		if len(preview) > 240 {
-			preview = preview[:240] + "..."
-		}
-		return fmt.Errorf("invalid JSON response (%s): %w; body=%q", response.Header.Get("Content-Type"), err, preview)
-	}
-	return nil
+	return body, response.Header.Get("Content-Type"), nil
 }
 
 func isGroqChatModel(id string) bool {

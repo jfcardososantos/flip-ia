@@ -52,3 +52,17 @@ func TestParseDeepSeekDataReadsArrayContent(t *testing.T) {
 		t.Fatalf("expected array content to be preserved without status, got %q", result.Content)
 	}
 }
+
+func TestDeepSeekWebModelTypeRoutesOfficialFamilies(t *testing.T) {
+	tests := map[string]string{
+		"deepseek-v4-flash": "default",
+		"deepseek-v5-flash": "default",
+		"deepseek-v4-pro":   "expert",
+		"deepseek-expert":   "expert",
+	}
+	for model, want := range tests {
+		if got := DeepSeekWebModelType(model); got != want {
+			t.Errorf("DeepSeekWebModelType(%q) = %q; want %q", model, got, want)
+		}
+	}
+}

@@ -516,11 +516,14 @@ func availableModelRows() []gin.H {
 		}
 	}
 	if _, err := services.GetSelectedDeepSeekAuth(); err == nil {
-		rows = append(rows,
-			gin.H{"ID": "deepseek-chat", "Provider": "DeepSeek Web", "Description": "Chat web DeepSeek"},
-			gin.H{"ID": "deepseek-reasoner", "Provider": "DeepSeek Web", "Description": "DeepSeek com thinking"},
-			gin.H{"ID": "deepseek-search", "Provider": "DeepSeek Web", "Description": "DeepSeek com busca web"},
-		)
+		for _, model := range services.DeepSeekWebModels() {
+			id, _ := model["id"].(string)
+			description, _ := model["description"].(string)
+			if id != "" {
+				rows = append(rows, gin.H{"ID": id, "Provider": "DeepSeek Web", "Description": description})
+			}
+		}
+		rows = append(rows, gin.H{"ID": "deepseek-search", "Provider": "DeepSeek Web", "Description": "Modelo web atual com busca ativada"})
 	}
 	if _, _, err := services.GetSelectedKimiSession(); err == nil {
 		rows = append(rows, gin.H{"ID": "kimi-k3", "Provider": "Kimi Web", "Description": "Kimi K3 via sessão do navegador"})

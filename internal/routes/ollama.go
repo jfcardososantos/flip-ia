@@ -51,8 +51,11 @@ func handleOllamaTags(c *gin.Context) {
 	}
 
 	addModel("default", "flip-ai")
-	addModel("deepseek-chat", "deepseek")
-	addModel("deepseek-reasoner", "deepseek")
+	for _, model := range services.DeepSeekWebModels() {
+		id, _ := model["id"].(string)
+		addModel(id, "deepseek")
+	}
+	addModel("deepseek-search", "deepseek")
 	addModel("kimi-k3", "kimi")
 	addModel("kimi-k2.6", "kimi")
 	for _, model := range services.OfficialProviderModels() {
@@ -467,8 +470,9 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 	prompt := buildDeepSeekPromptWithTools(spec.Messages, toolInstructions)
 	thinking := deepSeekThinkingEnabled(targetModel)
 	search := strings.Contains(strings.ToLower(targetModel), "search")
+	modelType := services.DeepSeekWebModelType(targetModel)
 
-	resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, prompt, thinking, search, customHeaders)
+	resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, prompt, thinking, search, modelType, customHeaders)
 	if err != nil {
 		writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to call DeepSeek: "+err.Error())
 		return

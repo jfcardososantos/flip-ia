@@ -226,3 +226,12 @@ print("Documento formatado")
 		t.Fatalf("unexpected timeout: %#v", args["timeout"])
 	}
 }
+
+func TestDeepSeekThinkingEnabledForCurrentOfficialModels(t *testing.T) {
+	if deepSeekThinkingEnabled("deepseek-v4-flash") {
+		t.Fatal("Flash should use the Web default non-thinking mode")
+	}
+	if !deepSeekThinkingEnabled("deepseek-v4-pro") {
+		t.Fatal("Pro should use Web Expert thinking mode")
+	}
+}

@@ -99,7 +99,7 @@ func TestOllamaTagsDoNotRequireXiaomiAuth(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"default", "deepseek-chat", "gemini-2.5-flash", "openrouter/google/gemma-3-12b-it:free"} {
+	for _, want := range []string{"default", "deepseek-v4-flash", "deepseek-v4-pro", "gemini-2.5-flash", "openrouter/google/gemma-3-12b-it:free"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected tags to include %q, got %s", want, body)
 		}

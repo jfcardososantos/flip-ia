@@ -84,11 +84,11 @@ Notas:
 
 ## Catálogo automático de modelos
 
-Ao iniciar, o proxy carrega o último catálogo salvo e consulta em paralelo as listas atuais da Qwen, Xiaomi, Gemini, Groq, OpenRouter e Cloudflare. Providers que precisam de credenciais só são consultados quando estão configurados. O OpenRouter é público e, por padrão, o catálogo mantém somente os modelos gratuitos.
+Ao iniciar, o proxy carrega o último catálogo salvo e consulta em paralelo as listas atuais da DeepSeek, Qwen, Xiaomi, Gemini, Groq, OpenRouter e Cloudflare. A DeepSeek é descoberta pela tabela oficial `Models & Pricing`, sem chave de API. Providers que precisam de credenciais só são consultados quando estão configurados. O OpenRouter é público e, por padrão, o catálogo mantém somente os modelos gratuitos.
 
 O resultado é salvo em `data/model_catalog.json` (ou em `MODEL_CATALOG_PATH`), reaproveitado quando um provider estiver indisponível e atualizado novamente a cada seis horas. Quando uma chave ou sessão é importada pelo dashboard/extensão, um novo refresh é disparado em segundo plano.
 
-Os IDs recebem os prefixos esperados pelo roteador (`groq/`, `openrouter/`, `cf/` e `qwen-web/`). O alias `qwen-web` acompanha automaticamente o modelo principal ativo informado pela Qwen, salvo se `QWEN_WEB_DEFAULT_MODEL` estiver definido.
+Os IDs recebem os prefixos esperados pelo roteador (`groq/`, `openrouter/`, `cf/` e `qwen-web/`). O alias `qwen-web` acompanha automaticamente o modelo principal ativo informado pela Qwen, salvo se `QWEN_WEB_DEFAULT_MODEL` estiver definido. Os IDs oficiais `deepseek-*` são atualizados pela documentação oficial; famílias `*-pro` usam o Expert Mode do adapter web e as demais acompanham o modo web padrão.
 
 Variáveis opcionais:
 
@@ -98,9 +98,10 @@ MODEL_CATALOG_REFRESH_INTERVAL=6h
 MODEL_CATALOG_TIMEOUT_SECONDS=15
 MODEL_CATALOG_PATH=
 OPENROUTER_FREE_MODELS_ONLY=true
+# DEEPSEEK_MODELS_URL=https://api-docs.deepseek.com/quick_start/pricing/
 ```
 
-Os aliases especiais de DeepSeek e Kimi continuam controlados pelo proxy, porque representam modos do adapter web, e não uma simples lista de modelos de API.
+`deepseek-search` e os aliases Kimi continuam controlados pelo proxy porque representam capacidades/modos dos adapters web, não nomes oficiais de modelos.
 
 ## Providers oficiais
 

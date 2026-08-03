@@ -155,21 +155,8 @@ func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]inte
 	})
 	modelsList = append(modelsList, services.OfficialProviderModels()...)
 	modelsList = append(modelsList, services.QwenWebModels()...)
+	modelsList = append(modelsList, services.DeepSeekWebModels()...)
 	modelsList = append(modelsList,
-		map[string]interface{}{
-			"id":          "deepseek-chat",
-			"object":      "model",
-			"created":     1735689600,
-			"owned_by":    "deepseek",
-			"description": "DeepSeek web chat session",
-		},
-		map[string]interface{}{
-			"id":          "deepseek-reasoner",
-			"object":      "model",
-			"created":     1735689600,
-			"owned_by":    "deepseek",
-			"description": "DeepSeek web chat session with thinking enabled",
-		},
 		map[string]interface{}{
 			"id":          "deepseek-search",
 			"object":      "model",
@@ -1083,8 +1070,9 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	prompt := buildDeepSeekPromptWithTools(input.Messages, toolInstructions)
 	thinking := deepSeekThinkingEnabled(targetModel)
 	search := input.WebSearch || strings.Contains(strings.ToLower(targetModel), "search")
+	modelType := services.DeepSeekWebModelType(targetModel)
 
-	resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, prompt, thinking, search, customHeaders)
+	resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, prompt, thinking, search, modelType, customHeaders)
 	if err != nil {
 		if err == services.ErrDeepSeekPoWRequired {
 			fmt.Printf("[%s] DeepSeek PoW required but solver did not return a response\n", completionID)
@@ -1114,7 +1102,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	result := services.ParseDeepSeekStream(bodyReader)
 	closeBody()
 	if agentMode {
-		result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, thinking, search, customHeaders, toolChoice, completionID, input.Tools)
+		result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, thinking, search, modelType, customHeaders, toolChoice, completionID, input.Tools)
 	}
 	result.Usage.PromptTokens = len(prompt) / 4
 	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
@@ -1146,7 +1134,7 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 // such as "vou verificar" without a call the client can actually execute.
 // DeepSeek Web does not natively support the OpenAI tools protocol, so this is
 // a bounded semantic retry using the same conversation session.
-func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.DeepSeekAuth, session services.StoredWebSession, sessionID, prompt string, thinking, search bool, customHeaders map[string]string, toolChoice, completionID string, tools []models.Tool) models.DeepSeekChatResult {
+func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.DeepSeekAuth, session services.StoredWebSession, sessionID, prompt string, thinking, search bool, modelType string, customHeaders map[string]string, toolChoice, completionID string, tools []models.Tool) models.DeepSeekChatResult {
 	result := first
 	for attempt := 0; attempt < 3; attempt++ {
 		_, calls := utils.ParseToolCalls(result.Content)
@@ -1163,7 +1151,7 @@ func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.D
 		// recursively made each retry larger and encouraged DeepSeek to repeat the
 		// malformed code block instead of emitting the tool envelope.
 		currentPrompt := buildAgentToolRetryQuery(prompt, parsed)
-		resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, currentPrompt, thinking, search, customHeaders)
+		resp, err := services.SendDeepSeekChatRequest(auth, session, sessionID, currentPrompt, thinking, search, modelType, customHeaders)
 		if err != nil {
 			fmt.Printf("[%s] DeepSeek agent recovery request failed: %v\n", completionID, err)
 			return recoverDeepSeekCodeToolCall(result, tools)
@@ -1320,6 +1308,9 @@ func deepSeekThinkingEnabled(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if strings.Contains(model, "no-thinking") || strings.Contains(model, "v3") || model == "deepseek-chat" {
 		return false
+	}
+	if strings.Contains(model, "-pro") || strings.Contains(model, "expert") {
+		return true
 	}
 	return strings.Contains(model, "reason") || strings.Contains(model, "r1") || strings.Contains(model, "think")
 }

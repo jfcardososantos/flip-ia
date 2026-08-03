@@ -8,6 +8,56 @@ import (
 	"testing"
 )
 
+func TestDiscoverDeepSeekModelsUsesOfficialModelTable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != "text/html,application/xhtml+xml" {
+			t.Fatalf("unexpected Accept header: %q", r.Header.Get("Accept"))
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><body>
+<h2 id="model-details">Model Details</h2>
+<table>
+  <tr><td colspan="2">MODEL</td><td>deepseek-v5-flash</td><td>deepseek-v5-pro</td></tr>
+  <tr><td>MODEL VERSION</td><td>DeepSeek-V5-Flash-0801</td><td>DeepSeek-V5-Pro</td></tr>
+</table>
+<p>Legacy names deepseek-chat and deepseek-reasoner are retired.</p>
+</body></html>`))
+	}))
+	defer server.Close()
+	t.Setenv("DEEPSEEK_MODELS_URL", server.URL)
+
+	result := discoverDeepSeekModels(context.Background())
+	if result.err != nil {
+		t.Fatalf("discoverDeepSeekModels: %v", result.err)
+	}
+	if result.defaultModel != "deepseek-v5-flash" {
+		t.Fatalf("default model = %q; want deepseek-v5-flash", result.defaultModel)
+	}
+	if len(result.models) != 2 {
+		t.Fatalf("model count = %d; want 2: %+v", len(result.models), result.models)
+	}
+	if result.models[0].ID != "deepseek-v5-flash" || result.models[1].ID != "deepseek-v5-pro" {
+		t.Fatalf("unexpected models: %+v", result.models)
+	}
+	if !result.models[0].Dynamic || !result.models[1].Dynamic {
+		t.Fatal("discovered DeepSeek models must be marked dynamic")
+	}
+}
+
+func TestDiscoverDeepSeekModelsRejectsPageWithoutModelTable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<p>deepseek-v9-rumor</p>`))
+	}))
+	defer server.Close()
+	t.Setenv("DEEPSEEK_MODELS_URL", server.URL)
+
+	result := discoverDeepSeekModels(context.Background())
+	if result.err == nil {
+		t.Fatal("expected missing official model table to fail discovery")
+	}
+}
+
 func TestDiscoverQwenModelsUsesCurrentActiveTextModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.Header.Get("User-Agent"), "Go-http-client/") {

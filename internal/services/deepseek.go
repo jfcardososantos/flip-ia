@@ -6,9 +6,9 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"flip-ai/internal/models"
 	"fmt"
 	"io"
-	"flip-ai/internal/models"
 	"net/http"
 	"os"
 	"strings"
@@ -21,6 +21,17 @@ var ErrDeepSeekPoWRequired = errors.New("DeepSeek web requires a proof-of-work c
 func IsDeepSeekModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	return model == "deepseek" || strings.HasPrefix(model, "deepseek-")
+}
+
+// DeepSeekWebModelType maps official model families to the selector used by
+// chat.deepseek.com. Newly discovered non-Pro models follow the Web default,
+// while Pro models use Expert mode.
+func DeepSeekWebModelType(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(model, "-pro") || strings.Contains(model, "expert") {
+		return "expert"
+	}
+	return "default"
 }
 
 func ValidateDeepSeekAuthInput(rawCookie string, token string) (models.DeepSeekAuth, error) {
@@ -143,10 +154,14 @@ func CreateDeepSeekSession(auth models.DeepSeekAuth, session StoredWebSession, c
 	return result.Data.BizData.ID, nil
 }
 
-func SendDeepSeekChatRequest(auth models.DeepSeekAuth, session StoredWebSession, sessionID string, prompt string, thinking bool, search bool, customHeaders map[string]string) (*http.Response, error) {
+func SendDeepSeekChatRequest(auth models.DeepSeekAuth, session StoredWebSession, sessionID string, prompt string, thinking bool, search bool, modelType string, customHeaders map[string]string) (*http.Response, error) {
+	if strings.TrimSpace(modelType) == "" {
+		modelType = "default"
+	}
 	payload := map[string]interface{}{
 		"chat_session_id":   sessionID,
 		"parent_message_id": nil,
+		"model_type":        modelType,
 		"prompt":            prompt,
 		"ref_file_ids":      []string{},
 		"thinking_enabled":  thinking,

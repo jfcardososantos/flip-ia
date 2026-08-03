@@ -180,8 +180,9 @@ func isRecoverableKimiModelError(err error) bool {
 }
 
 func buildKimiChatBody(modelConfig kimiWebModelConfig, prompt, systemPrompt string) ([]byte, error) {
+	thinking := modelConfig.ReasoningEffort != "" && modelConfig.ReasoningEffort != "REASONING_EFFORT_NONE"
 	options := map[string]interface{}{
-		"thinking":         true,
+		"thinking":         thinking,
 		"enable_plugin":    false,
 		"reasoning_effort": modelConfig.ReasoningEffort,
 	}

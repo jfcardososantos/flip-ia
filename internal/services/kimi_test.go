@@ -138,3 +138,19 @@ func TestKimiWebRequestTimeoutConfiguration(t *testing.T) {
 		t.Fatalf("unexpected default timeout: %s", got)
 	}
 }
+
+func TestBuildKimiChatBodyDisablesThinkingForK2Fallback(t *testing.T) {
+	config, _ := resolveKimiWebModel("kimi-k2.6")
+	body, err := buildKimiChatBody(config, "hello", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	options, _ := payload["options"].(map[string]interface{})
+	if thinking, _ := options["thinking"].(bool); thinking {
+		t.Fatalf("K2 fallback must not force thinking: %s", body)
+	}
+}

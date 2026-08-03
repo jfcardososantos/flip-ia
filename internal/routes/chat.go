@@ -994,13 +994,19 @@ func handleKimiChatCompletions(c *gin.Context, input openAIChatInput, completion
 		toolInstructions += kimiAgentAdapterInstructions()
 		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
 	}
-	outcome := awaitKimiBufferedResult(c, input.Stream, func() kimiBufferedOutcome {
-		result, chatErr := services.KimiChat(session, accessToken, targetModel, messages)
-		if chatErr == nil && agentMode {
-			result, chatErr = recoverKimiAgentToolCall(result, session, accessToken, messages, toolChoice, completionID, input.Tools)
-		}
-		return kimiBufferedOutcome{result: result, err: chatErr}
-	})
+	outcome := kimiBufferedOutcome{}
+	if call, ok := synthesizeKimiSkillReadFollowup(input.Messages, input.Tools); agentMode && ok {
+		payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
+		outcome.result = services.KimiChatResult{Content: "<tool_call>" + string(payload) + "</tool_call>", ActualModel: targetModel}
+	} else {
+		outcome = awaitKimiBufferedResult(c, input.Stream, func() kimiBufferedOutcome {
+			result, chatErr := services.KimiChat(session, accessToken, targetModel, messages)
+			if chatErr == nil && agentMode {
+				result, chatErr = recoverKimiAgentToolCall(result, session, accessToken, messages, toolChoice, completionID, input.Tools)
+			}
+			return kimiBufferedOutcome{result: result, err: chatErr}
+		})
+	}
 	result := outcome.result
 	if outcome.err != nil {
 		c.Header("Retry-After", "1")
@@ -1189,6 +1195,68 @@ func synthesizeKimiReadOnlyDiscoveryToolCall(tools []models.Tool) (models.ToolCa
 				arguments["command"] = `pwd; find . -maxdepth 5 -type f \( -iname '*skill*' -o -iname '*google*' -o -iname '*docs*' -o -iname '*slides*' \) 2>/dev/null | head -200`
 			} else if _, ok := properties["code"]; ok {
 				arguments["code"] = "import os\nfor root, dirs, files in os.walk('.'):\n    if root.count(os.sep) > 5:\n        dirs[:] = []\n        continue\n    for name in files:\n        low = name.lower()\n        if any(term in low for term in ('skill', 'google', 'docs', 'slides')):\n            print(os.path.join(root, name))"
+			} else {
+				continue
+			}
+			if required, ok := parameters["required"].([]interface{}); ok {
+				valid := true
+				for _, rawName := range required {
+					name, _ := rawName.(string)
+					switch name {
+					case "command", "code":
+					case "timeout":
+						arguments[name] = 30
+					case "cwd", "workdir":
+						arguments[name] = "."
+					default:
+						valid = false
+					}
+				}
+				if !valid {
+					continue
+				}
+			}
+			encoded, _ := json.Marshal(arguments)
+			return models.ToolCall{Type: "function", Function: models.ToolFunction{Name: tool.Function.Name, Arguments: string(encoded)}}, true
+		}
+	}
+	return models.ToolCall{}, false
+}
+
+func synthesizeKimiSkillReadFollowup(messages []models.Message, tools []models.Tool) (models.ToolCall, bool) {
+	path := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "tool" && messages[i].Role != "function" {
+			continue
+		}
+		for _, line := range strings.Split(services.ExtractText(messages[i].Content, false), "\n") {
+			candidate := strings.Trim(strings.TrimSpace(line), "`\"'")
+			candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "- "))
+			if strings.HasSuffix(strings.ToLower(candidate), "skill.md") && !strings.ContainsAny(candidate, "\x00\r") {
+				path = candidate
+				break
+			}
+		}
+		break
+	}
+	if path == "" {
+		return models.ToolCall{}, false
+	}
+
+	quotedPath := "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+	pathJSON, _ := json.Marshal(path)
+	for _, preferredName := range []string{"terminal", "execute_command", "run_command", "shell", "execute_code"} {
+		for _, tool := range tools {
+			if !strings.EqualFold(strings.TrimSpace(tool.Function.Name), preferredName) {
+				continue
+			}
+			parameters, _ := tool.Function.Parameters.(map[string]interface{})
+			properties, _ := parameters["properties"].(map[string]interface{})
+			arguments := map[string]interface{}{}
+			if _, ok := properties["command"]; ok {
+				arguments["command"] = "sed -n '1,260p' -- " + quotedPath
+			} else if _, ok := properties["code"]; ok {
+				arguments["code"] = "path = " + string(pathJSON) + "\nwith open(path, 'r', encoding='utf-8') as handle:\n    print(''.join(handle.readlines()[:260]))"
 			} else {
 				continue
 			}

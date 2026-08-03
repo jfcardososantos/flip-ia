@@ -323,6 +323,24 @@ func TestSynthesizeKimiReadOnlyDiscoveryUsesAuthorizedTerminal(t *testing.T) {
 	}
 }
 
+func TestSynthesizeKimiSkillReadFollowup(t *testing.T) {
+	messages := []models.Message{{Role: "tool", Content: "./skills/google-docs/SKILL.md\n./skills/google-slides/SKILL.md"}}
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "terminal",
+			Parameters: map[string]interface{}{
+				"properties": map[string]interface{}{"command": map[string]interface{}{"type": "string"}},
+				"required":   []interface{}{"command"},
+			},
+		},
+	}}
+	call, ok := synthesizeKimiSkillReadFollowup(messages, tools)
+	if !ok || call.Function.Name != "terminal" || !strings.Contains(call.Function.Arguments, "google-docs/SKILL.md") {
+		t.Fatalf("unexpected skill-read call: %+v, ok=%v", call, ok)
+	}
+}
+
 func TestKimiAgentInstructionsDeclareHostToolsAsReal(t *testing.T) {
 	instructions := kimiAgentAdapterInstructions()
 	for _, required := range []string{"Hermes Agent", "Kilo Code", "skills", "credentials", "<tool_call>"} {

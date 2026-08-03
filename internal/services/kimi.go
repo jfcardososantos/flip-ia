@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"flip-ai/internal/models"
@@ -35,12 +36,26 @@ func resolveKimiWebModel(model string) (kimiWebModelConfig, bool) {
 	case "kimi-k3", "kimi/k3", "k3":
 		return kimiWebModelConfig{
 			Scenario: "SCENARIO_OK_COMPUTER", KimiPlusID: "ok-computer",
-			ReasoningEffort: "REASONING_EFFORT_MAX", ContextLength: "CONTEXT_LENGTH_L",
+			ReasoningEffort: kimiK3ReasoningEffort(), ContextLength: "CONTEXT_LENGTH_L",
 		}, true
 	case "kimi-k2.6", "kimi/k2.6", "k2d6":
 		return kimiWebModelConfig{Scenario: "SCENARIO_K2D5", ReasoningEffort: "REASONING_EFFORT_NONE"}, true
 	default:
 		return kimiWebModelConfig{}, false
+	}
+}
+
+// Kimi Web currently defaults K3 to HIGH. MAX consumes a separately limited
+// quota and starts returning resource_exhausted once that allowance is spent,
+// which made the proxy fail even though the regular K3 tier remained usable.
+func kimiK3ReasoningEffort() string {
+	value := strings.ToUpper(strings.TrimSpace(os.Getenv("KIMI_K3_REASONING_EFFORT")))
+	value = strings.TrimPrefix(value, "REASONING_EFFORT_")
+	switch value {
+	case "NONE", "MINIMAL", "LOW", "MEDIUM", "HIGH", "XHIGH", "MAX":
+		return "REASONING_EFFORT_" + value
+	default:
+		return "REASONING_EFFORT_HIGH"
 	}
 }
 

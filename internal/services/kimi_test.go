@@ -75,3 +75,17 @@ func TestKimiModelAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestKimiK3DefaultsToRegularHighQuota(t *testing.T) {
+	t.Setenv("KIMI_K3_REASONING_EFFORT", "")
+	config, ok := resolveKimiWebModel("kimi-k3")
+	if !ok || config.ReasoningEffort != "REASONING_EFFORT_HIGH" {
+		t.Fatalf("unexpected K3 config: %+v", config)
+	}
+
+	t.Setenv("KIMI_K3_REASONING_EFFORT", "max")
+	config, _ = resolveKimiWebModel("kimi-k3")
+	if config.ReasoningEffort != "REASONING_EFFORT_MAX" {
+		t.Fatalf("expected explicit MAX override, got %+v", config)
+	}
+}

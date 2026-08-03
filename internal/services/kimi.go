@@ -21,6 +21,8 @@ type KimiChatResult struct {
 	ReasoningText string
 }
 
+var ErrKimiEmptyResponse = errors.New("Kimi stream ended without response content")
+
 type kimiWebModelConfig struct {
 	Scenario        string
 	KimiPlusID      string
@@ -99,10 +101,10 @@ func KimiChat(session StoredWebSession, accessToken, model string, messages []mo
 	payload := map[string]interface{}{
 		"chat_id":  "",
 		"scenario": modelConfig.Scenario,
-		"tools":       []interface{}{},
+		"tools":    []interface{}{},
 		"message": map[string]interface{}{
 			"id": "", "parent_id": "", "children_message_ids": []interface{}{}, "role": "user",
-			"blocks": []interface{}{map[string]interface{}{"id": "", "message_id": "", "text": map[string]string{"content": prompt}}},
+			"blocks":   []interface{}{map[string]interface{}{"id": "", "message_id": "", "text": map[string]string{"content": prompt}}},
 			"scenario": modelConfig.Scenario, "labels": []interface{}{}, "references": []interface{}{}, "is_goal": false,
 		},
 		"options": options, "project_id": "",
@@ -114,6 +116,21 @@ func KimiChat(session StoredWebSession, accessToken, model string, messages []mo
 	if err != nil {
 		return KimiChatResult{}, err
 	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := sendKimiChatRequest(session, accessToken, body)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrKimiEmptyResponse) {
+			break
+		}
+	}
+	return KimiChatResult{}, lastErr
+}
+
+func sendKimiChatRequest(session StoredWebSession, accessToken string, body []byte) (KimiChatResult, error) {
 	req, err := http.NewRequest(http.MethodPost, kimiWebChatURL, bytes.NewReader(kimiConnectFrame(body)))
 	if err != nil {
 		return KimiChatResult{}, err
@@ -170,8 +187,11 @@ func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 			return KimiChatResult{}, errors.New("invalid Kimi Connect payload")
 		}
 		if flags&2 != 0 {
-			if errValue, ok := event["error"].(map[string]interface{}); ok {
-				return KimiChatResult{}, fmt.Errorf("Kimi stream error: %v", errValue["message"])
+			if streamErr := kimiConnectEndError(event); streamErr != nil {
+				return KimiChatResult{}, streamErr
+			}
+			if strings.TrimSpace(result.Content) == "" {
+				return result, ErrKimiEmptyResponse
 			}
 			return result, nil
 		}
@@ -194,7 +214,50 @@ func parseKimiConnectStream(raw []byte) (KimiChatResult, error) {
 			result.ReasoningText += kimiBlockContent(block, "think")
 		}
 	}
-	return KimiChatResult{}, errors.New("Kimi stream ended without an end frame")
+	// Some edge/CDN paths close the HTTP body after the final content frame
+	// without forwarding the optional Connect end envelope. A complete answer is
+	// still usable; only a content-less close is an upstream failure.
+	if strings.TrimSpace(result.Content) != "" {
+		return result, nil
+	}
+	return result, ErrKimiEmptyResponse
+}
+
+// Connect end-stream envelopes may legally contain no error, null, or an empty
+// error object. The current Kimi K3 endpoint uses the latter. Treat it as an
+// error only when it carries an actual code/message; formatting a missing
+// message produced the misleading "Kimi stream error: <nil>" failure.
+func kimiConnectEndError(event map[string]interface{}) error {
+	rawError, exists := event["error"]
+	if !exists || rawError == nil {
+		return nil
+	}
+	errorValue, ok := rawError.(map[string]interface{})
+	if !ok {
+		text := strings.TrimSpace(fmt.Sprint(rawError))
+		if text == "" || text == "<nil>" {
+			return nil
+		}
+		return fmt.Errorf("Kimi stream error: %s", text)
+	}
+
+	message := strings.TrimSpace(fmt.Sprint(errorValue["message"]))
+	if message == "<nil>" {
+		message = ""
+	}
+	code := strings.TrimSpace(fmt.Sprint(errorValue["code"]))
+	if code == "<nil>" || code == "0" || strings.EqualFold(code, "ok") {
+		code = ""
+	}
+	if message == "" && code == "" {
+		return nil
+	}
+	if message == "" {
+		message = code
+	} else if code != "" {
+		message = code + ": " + message
+	}
+	return fmt.Errorf("Kimi stream error: %s", message)
 }
 
 func kimiBlockContent(block map[string]interface{}, kind string) string {

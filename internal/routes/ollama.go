@@ -367,7 +367,7 @@ func runKimiOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetModel st
 	}
 	result, err := services.KimiChat(session, accessToken, targetModel, spec.Messages)
 	if err != nil {
-		writeOllamaError(c, spec.Stream, upstreamFailureStatus, "Failed to call Kimi Web: "+err.Error())
+		writeOllamaError(c, spec.Stream, http.StatusBadGateway, "Failed to call Kimi Web: "+err.Error())
 		return
 	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)

@@ -491,8 +491,19 @@ func runDeepSeekOllamaRequest(c *gin.Context, spec ollamaRequestSpec, targetMode
 	}
 
 	bodyReader, closeBody := services.ReadDeepSeekBody(resp)
-	result := services.ParseDeepSeekStream(bodyReader)
+	result := services.ParseDeepSeekStreamMode(bodyReader, thinking)
 	closeBody()
+	if strings.TrimSpace(result.Content) == "" {
+		var recoveredModelType string
+		result, recoveredModelType, err = services.RecoverDeepSeekEmptyResponse(result, auth, session, prompt, thinking, search, modelType, customHeaders)
+		if err != nil {
+			writeOllamaError(c, spec.Stream, upstreamFailureStatus, err.Error())
+			return
+		}
+		if recoveredModelType != modelType {
+			c.Header("X-Mimo-Upstream-Fallback", "deepseek-web-default")
+		}
+	}
 	result.Usage.PromptTokens = len(prompt) / 4
 	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
 

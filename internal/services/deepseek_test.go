@@ -1,11 +1,33 @@
 package services
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"flip-ai/internal/models"
 )
+
+func TestParseDeepSeekExpertFragmentStreamKeepsThinkingOutOfContent(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"v":{"response":{"message_id":"expert_msg_2","fragments":[{"type":"THINK","content":"analisando "}]}}}`,
+		`data: {"p":"response/fragments/-1/content","v":"o pedido"}`,
+		`data: {"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":""}]}`,
+		`data: {"p":"response/fragments/-1/content","v":"bom dia"}`,
+		`data: {"p":"response/status","v":"FINISHED"}`,
+	}, "\n")
+
+	result := ParseDeepSeekStreamMode(bytes.NewBufferString(stream), true)
+	if result.MessageID != "expert_msg_2" {
+		t.Fatalf("unexpected message id: %q", result.MessageID)
+	}
+	if result.ReasoningText != "analisando o pedido" {
+		t.Fatalf("unexpected reasoning: %q", result.ReasoningText)
+	}
+	if result.Content != "bom dia" {
+		t.Fatalf("expected only final response as content, got %q", result.Content)
+	}
+}
 
 func TestParseDeepSeekDataSkipsFinishedStatus(t *testing.T) {
 	result := models.DeepSeekChatResult{}

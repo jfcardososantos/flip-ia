@@ -1102,10 +1102,40 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	}
 
 	bodyReader, closeBody := services.ReadDeepSeekBody(resp)
-	result := services.ParseDeepSeekStream(bodyReader)
-	closeBody()
-	if agentMode {
-		result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, thinking, search, modelType, customHeaders, toolChoice, completionID, input.Tools)
+	outcome := awaitDeepSeekBufferedResult(c, input.Stream, func() deepSeekBufferedOutcome {
+		defer closeBody()
+		result := services.ParseDeepSeekStreamMode(bodyReader, thinking)
+		effectiveModelType := modelType
+		effectiveThinking := thinking
+		if strings.TrimSpace(result.Content) == "" {
+			var recoveryErr error
+			result, effectiveModelType, recoveryErr = services.RecoverDeepSeekEmptyResponse(result, auth, session, prompt, thinking, search, modelType, customHeaders)
+			if recoveryErr != nil {
+				return deepSeekBufferedOutcome{result: result, modelType: effectiveModelType, err: recoveryErr}
+			}
+			if effectiveModelType != modelType {
+				effectiveThinking = false
+			}
+		}
+		if agentMode {
+			result = recoverDeepSeekAgentToolCall(result, auth, session, sessionID, prompt, effectiveThinking, search, effectiveModelType, customHeaders, toolChoice, completionID, input.Tools)
+		}
+		if strings.TrimSpace(result.Content) == "" {
+			return deepSeekBufferedOutcome{result: result, modelType: effectiveModelType, err: services.ErrDeepSeekEmptyResponse}
+		}
+		return deepSeekBufferedOutcome{result: result, modelType: effectiveModelType}
+	})
+	result := outcome.result
+	if outcome.err != nil {
+		fmt.Printf("[%s] DeepSeek empty response after internal recovery: %v\n", completionID, outcome.err)
+		sendDeepSeekBufferedError(c, input.Stream, outcome.err)
+		return
+	}
+	if outcome.modelType != modelType {
+		if !c.Writer.Written() {
+			c.Header("X-Mimo-Upstream-Fallback", "deepseek-web-default")
+		}
+		fmt.Printf("[%s] DeepSeek Expert empty; recovered with Web default mode\n", completionID)
 	}
 	result.Usage.PromptTokens = len(prompt) / 4
 	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
@@ -1130,6 +1160,54 @@ func handleDeepSeekChatCompletions(c *gin.Context, input openAIChatInput, comple
 	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result, responseCalls)
 	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	c.JSON(http.StatusOK, response)
+}
+
+type deepSeekBufferedOutcome struct {
+	result    models.DeepSeekChatResult
+	modelType string
+	err       error
+}
+
+// DeepSeek Web responses are buffered so XML tool envelopes can be converted
+// into native OpenAI tool calls. While that work is in progress, emit an SSE
+// comment periodically so Hermes and reverse proxies do not mistake a slow
+// Expert turn for a dead connection.
+func awaitDeepSeekBufferedResult(c *gin.Context, stream bool, job func() deepSeekBufferedOutcome) deepSeekBufferedOutcome {
+	if !stream {
+		return job()
+	}
+
+	resultCh := make(chan deepSeekBufferedOutcome, 1)
+	go func() { resultCh <- job() }()
+	ticker := time.NewTicker(12 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case result := <-resultCh:
+			return result
+		case <-ticker.C:
+			c.Header("Content-Type", "text/event-stream; charset=utf-8")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			c.Header("X-Accel-Buffering", "no")
+			c.Writer.WriteString(": mimo keep-alive\n\n")
+			c.Writer.Flush()
+		case <-c.Request.Context().Done():
+			return deepSeekBufferedOutcome{err: c.Request.Context().Err()}
+		}
+	}
+}
+
+func sendDeepSeekBufferedError(c *gin.Context, stream bool, err error) {
+	if !stream || !c.Writer.Written() {
+		utils.SendError(c, upstreamFailureStatus, err.Error(), "server_error", nil)
+		return
+	}
+	payload, _ := json.Marshal(gin.H{"error": gin.H{"message": err.Error(), "type": "server_error"}})
+	c.Writer.WriteString("data: " + string(payload) + "\n\n")
+	c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
 }
 
 // Thinking-mode DeepSeek models require reasoning_content to be replayed with
@@ -1179,7 +1257,7 @@ func recoverDeepSeekAgentToolCall(first models.DeepSeekChatResult, auth models.D
 			return recoverDeepSeekCodeToolCall(result, tools)
 		}
 		bodyReader, closeBody := services.ReadDeepSeekBody(resp)
-		result = services.ParseDeepSeekStream(bodyReader)
+		result = services.ParseDeepSeekStreamMode(bodyReader, thinking)
 		closeBody()
 	}
 

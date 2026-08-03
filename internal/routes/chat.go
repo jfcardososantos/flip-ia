@@ -1127,6 +1127,13 @@ func recoverKimiAgentToolCall(first services.KimiChatResult, session services.St
 	if clean == "" {
 		clean = result.Content
 	}
+	if looksLikeKimiFalseToolRefusal(clean) {
+		if call, ok := synthesizeKimiReadOnlyDiscoveryToolCall(tools); ok {
+			payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
+			result.Content = "<tool_call>" + string(payload) + "</tool_call>"
+			return result, nil
+		}
+	}
 	parsed := parsedMimoChat{CleanText: clean, ReasoningText: result.ReasoningText}
 	if shouldRetryKimiAgentToolCall(parsed, toolChoice) {
 		return result, fmt.Errorf("Kimi did not emit an authorized tool call after agent recovery")
@@ -1146,6 +1153,9 @@ func looksLikeKimiFalseToolRefusal(text string) bool {
 	for _, marker := range []string{
 		"não tenho acesso", "nao tenho acesso", "não consigo acessar", "nao consigo acessar",
 		"não consigo criar", "nao consigo criar", "não posso criar", "nao posso criar",
+		"não tenho a capacidade", "nao tenho a capacidade", "não sou capaz", "nao sou capaz",
+		"não posso acessar", "nao posso acessar", "não posso executar", "nao posso executar",
+		"não posso criar", "nao posso criar", "não posso editar", "nao posso editar",
 		"não tenho a ferramenta", "nao tenho a ferramenta", "ferramenta disponível", "ferramenta disponivel",
 		"não consigo editar", "nao consigo editar", "não consigo sincronizar", "nao consigo sincronizar",
 		"i don't have access", "i do not have access", "i cannot access", "i can't access",
@@ -1157,6 +1167,47 @@ func looksLikeKimiFalseToolRefusal(text string) bool {
 		}
 	}
 	return false
+}
+
+func synthesizeKimiReadOnlyDiscoveryToolCall(tools []models.Tool) (models.ToolCall, bool) {
+	for _, preferredName := range []string{"terminal", "execute_command", "run_command", "shell", "execute_code"} {
+		for _, tool := range tools {
+			if !strings.EqualFold(strings.TrimSpace(tool.Function.Name), preferredName) {
+				continue
+			}
+			parameters, _ := tool.Function.Parameters.(map[string]interface{})
+			properties, _ := parameters["properties"].(map[string]interface{})
+			arguments := map[string]interface{}{}
+			if _, ok := properties["command"]; ok {
+				arguments["command"] = `pwd; find . -maxdepth 5 -type f \( -iname '*skill*' -o -iname '*google*' -o -iname '*docs*' -o -iname '*slides*' \) 2>/dev/null | head -200`
+			} else if _, ok := properties["code"]; ok {
+				arguments["code"] = "import os\nfor root, dirs, files in os.walk('.'):\n    if root.count(os.sep) > 5:\n        dirs[:] = []\n        continue\n    for name in files:\n        low = name.lower()\n        if any(term in low for term in ('skill', 'google', 'docs', 'slides')):\n            print(os.path.join(root, name))"
+			} else {
+				continue
+			}
+			if required, ok := parameters["required"].([]interface{}); ok {
+				valid := true
+				for _, rawName := range required {
+					name, _ := rawName.(string)
+					switch name {
+					case "command", "code":
+					case "timeout":
+						arguments[name] = 30
+					case "cwd", "workdir":
+						arguments[name] = "."
+					default:
+						valid = false
+					}
+				}
+				if !valid {
+					continue
+				}
+			}
+			encoded, _ := json.Marshal(arguments)
+			return models.ToolCall{Type: "function", Function: models.ToolFunction{Name: tool.Function.Name, Arguments: string(encoded)}}, true
+		}
+	}
+	return models.ToolCall{}, false
 }
 
 func filterKimiAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolChoice string) []models.ToolCall {

@@ -295,11 +295,31 @@ func TestKimiFalseToolRefusalTriggersRecovery(t *testing.T) {
 	for _, text := range []string{
 		"Infelizmente, não tenho acesso às suas credenciais do Google Docs.",
 		"Não consigo criar documentos diretamente na sua conta.",
+		"Infelizmente, não tenho a capacidade de criar documentos no Google Docs.",
+		"Não posso executar ações em contas externas.",
 		"I cannot access Google Slides or your credentials.",
 	} {
 		if !looksLikeKimiFalseToolRefusal(text) {
 			t.Fatalf("expected refusal recovery for %q", text)
 		}
+	}
+}
+
+func TestSynthesizeKimiReadOnlyDiscoveryUsesAuthorizedTerminal(t *testing.T) {
+	tools := []models.Tool{{
+		Type: "function",
+		Function: models.ToolDefinition{
+			Name: "terminal",
+			Parameters: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{"command": map[string]interface{}{"type": "string"}},
+				"required":   []interface{}{"command"},
+			},
+		},
+	}}
+	call, ok := synthesizeKimiReadOnlyDiscoveryToolCall(tools)
+	if !ok || call.Function.Name != "terminal" || !strings.Contains(call.Function.Arguments, "find") {
+		t.Fatalf("unexpected discovery call: %+v, ok=%v", call, ok)
 	}
 }
 

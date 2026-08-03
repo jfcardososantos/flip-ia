@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"flip-ai/internal/models"
 )
@@ -174,7 +176,7 @@ func kimiK3FallbackEnabled() bool {
 }
 
 func isRecoverableKimiModelError(err error) bool {
-	return errors.Is(err, ErrKimiEmptyResponse) || errors.Is(err, ErrKimiOverloaded) || errors.Is(err, ErrKimiResourceExhausted)
+	return errors.Is(err, ErrKimiEmptyResponse) || errors.Is(err, ErrKimiOverloaded) || errors.Is(err, ErrKimiResourceExhausted) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func buildKimiChatBody(modelConfig kimiWebModelConfig, prompt, systemPrompt string) ([]byte, error) {
@@ -207,7 +209,10 @@ func buildKimiChatBody(modelConfig kimiWebModelConfig, prompt, systemPrompt stri
 }
 
 func sendKimiChatRequest(session StoredWebSession, accessToken string, body []byte) (KimiChatResult, error) {
-	req, err := http.NewRequest(http.MethodPost, kimiWebChatURL, bytes.NewReader(kimiConnectFrame(body)))
+	requestTimeout := kimiWebRequestTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kimiWebChatURL, bytes.NewReader(kimiConnectFrame(body)))
 	if err != nil {
 		return KimiChatResult{}, err
 	}
@@ -225,6 +230,9 @@ func sendKimiChatRequest(session StoredWebSession, accessToken string, body []by
 
 	resp, err := GlobalHTTPClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return KimiChatResult{}, fmt.Errorf("Kimi request timed out after %s: %w", requestTimeout, context.DeadlineExceeded)
+		}
 		return KimiChatResult{}, err
 	}
 	defer resp.Body.Close()
@@ -236,6 +244,16 @@ func sendKimiChatRequest(session StoredWebSession, accessToken string, body []by
 		return KimiChatResult{}, fmt.Errorf("Kimi returned %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return parseKimiConnectStream(responseBody)
+}
+
+func kimiWebRequestTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("KIMI_WEB_REQUEST_TIMEOUT"))
+	if value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil && parsed >= 5*time.Second && parsed <= 5*time.Minute {
+			return parsed
+		}
+	}
+	return 45 * time.Second
 }
 
 func kimiConnectFrame(payload []byte) []byte {

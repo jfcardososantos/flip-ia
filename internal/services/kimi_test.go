@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -118,5 +119,22 @@ func TestKimiOverloadExceptionIsRecoverable(t *testing.T) {
 	})
 	if !errors.Is(err, ErrKimiOverloaded) {
 		t.Fatalf("expected overload sentinel, got %v", err)
+	}
+}
+
+func TestKimiTimeoutIsRecoverable(t *testing.T) {
+	if !isRecoverableKimiModelError(context.DeadlineExceeded) {
+		t.Fatal("Kimi request timeout must allow the next adaptive candidate")
+	}
+}
+
+func TestKimiWebRequestTimeoutConfiguration(t *testing.T) {
+	t.Setenv("KIMI_WEB_REQUEST_TIMEOUT", "30s")
+	if got := kimiWebRequestTimeout(); got.String() != "30s" {
+		t.Fatalf("unexpected configured timeout: %s", got)
+	}
+	t.Setenv("KIMI_WEB_REQUEST_TIMEOUT", "invalid")
+	if got := kimiWebRequestTimeout(); got.String() != "45s" {
+		t.Fatalf("unexpected default timeout: %s", got)
 	}
 }

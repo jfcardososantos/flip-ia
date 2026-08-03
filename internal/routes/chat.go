@@ -1096,6 +1096,13 @@ func recoverKimiAgentToolCall(first services.KimiChatResult, session services.St
 		if !shouldRetryKimiAgentToolCall(parsed, toolChoice) {
 			return result, nil
 		}
+		if looksLikeKimiFalseToolRefusal(clean) {
+			if call, ok := synthesizeKimiReadOnlyDiscoveryToolCall(tools); ok {
+				payload, _ := json.Marshal(map[string]interface{}{"name": call.Function.Name, "arguments": json.RawMessage(call.Function.Arguments)})
+				result.Content = "<tool_call>" + string(payload) + "</tool_call>"
+				return result, nil
+			}
+		}
 
 		retryMessages := append([]models.Message{}, messages...)
 		if strings.TrimSpace(result.Content) != "" {

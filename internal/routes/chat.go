@@ -877,8 +877,15 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 		utils.SendError(c, status, message, "server_error", nil)
 		return
 	}
+	recoveryPromptChars := 0
+	if agentMode {
+		result, updatedState, recoveryPromptChars = recoverQwenAgentToolCall(
+			result, session, upstreamModel, updatedState, input.Messages,
+			toolChoice, completionID, input.Tools, input.ParallelToolCalls, search,
+		)
+	}
 
-	promptTokens := len(prompt) / 4
+	promptTokens := (len(prompt) + recoveryPromptChars) / 4
 	if result.Usage.PromptTokens == 0 {
 		result.Usage.PromptTokens = promptTokens
 	}
@@ -895,6 +902,9 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 	}
 
 	content, toolCalls := utils.ParseToolCalls(result.Content)
+	if agentMode {
+		toolCalls = filterAllowedToolCalls(toolCalls, input.Tools, toolChoice)
+	}
 	toolCalls = finalizeToolCalls(toolCalls)
 	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
 	if len(toolCalls) > 0 {
@@ -917,14 +927,317 @@ func buildQwenPrompt(messages []models.Message, toolInstructions string) string 
 	if strings.TrimSpace(toolInstructions) == "" {
 		return buildDeepSeekPrompt(messages)
 	}
-	parts := []string{
-		"Tool instructions:\n" + strings.TrimSpace(toolInstructions),
-		"Qwen Web adapter rule: when an external action is needed, emit the matching <tool_call> block and wait for its result. Do not merely describe an action that still needs to be executed.",
+
+	var systemParts []string
+	var turns []string
+	for _, message := range messages {
+		formatted := formatConversationTurn(message)
+		if strings.TrimSpace(formatted) == "" {
+			continue
+		}
+		if message.Role == "system" || message.Role == "developer" {
+			systemParts = append(systemParts, formatted)
+			continue
+		}
+		turns = append(turns, formatted)
 	}
-	if conversation := buildDeepSeekPrompt(messages); strings.TrimSpace(conversation) != "" {
-		parts = append(parts, conversation)
-	}
+	parts := make([]string, 0, len(systemParts)+len(turns)+2)
+	parts = append(parts, systemParts...)
+	parts = append(parts, "Tool instructions:\n"+strings.TrimSpace(toolInstructions))
+	parts = append(parts, qwenAgentAdapterInstructions())
+	parts = append(parts, turns...)
 	return strings.Join(parts, "\n\n")
+}
+
+func qwenAgentAdapterInstructions() string {
+	return `Qwen Web agent adapter — mandatory execution rules:
+- You are operating inside Hermes Agent or an IDE agent such as Kilo Code. Every listed host tool is real and executable.
+- For coding work, inspect the workspace with tools before editing, perform the requested edits with tools, and run relevant validation commands afterward.
+- Never substitute a plan, sample code, a file path, or a promise to act for a real tool call. Raw code in prose is not executed.
+- If work remains, output exactly one valid <tool_call> block using an exact listed tool name, then wait for its <tool_result>.
+- Treat each tool result as an observation. Continue with the next tool call until the task is actually complete.
+- A final prose answer is allowed only after tool results demonstrate that the requested work and appropriate checks are complete.
+- Do not claim that tools, files, skills, credentials, a terminal, or a browser are unavailable when the host listed the corresponding tool.`
+}
+
+func recoverQwenAgentToolCall(
+	first models.DeepSeekChatResult,
+	session services.StoredWebSession,
+	upstreamModel string,
+	state services.WebChatState,
+	messages []models.Message,
+	toolChoice string,
+	completionID string,
+	tools []models.Tool,
+	parallelToolCalls *bool,
+	search bool,
+) (models.DeepSeekChatResult, services.WebChatState, int) {
+	result := first
+	additionalPromptChars := 0
+	for attempt := 0; attempt < 2; attempt++ {
+		clean, calls := utils.ParseToolCalls(result.Content)
+		calls = filterAllowedToolCalls(calls, tools, toolChoice)
+		parsed := parsedMimoChat{
+			CleanText:     clean,
+			ReasoningText: result.ReasoningText,
+			ToolCalls:     calls,
+			FinishReason:  "stop",
+		}
+		if !shouldRetryQwenAgentToolCall(parsed, toolChoice, messages) {
+			return result, state, additionalPromptChars
+		}
+		if synthesized := synthesizeQwenRecoveryToolCalls(parsed, messages, tools, toolChoice, parallelToolCalls); len(synthesized) > 0 {
+			result.Content = encodeToolCallsAsXML(synthesized)
+			result.ReasoningText = ""
+			return result, state, additionalPromptChars
+		}
+
+		correction := buildQwenAgentToolRetryPrompt(parsed, messages, tools)
+		additionalPromptChars += len(correction)
+		next, nextState, err := services.QwenWebChat(
+			session, upstreamModel, state, correction, state.Title, false, search,
+		)
+		if err != nil {
+			fmt.Printf("[%s] Qwen agent recovery request failed: %v\n", completionID, err)
+			break
+		}
+		result = next
+		state = nextState
+	}
+
+	clean, calls := utils.ParseToolCalls(result.Content)
+	calls = filterAllowedToolCalls(calls, tools, toolChoice)
+	parsed := parsedMimoChat{CleanText: clean, ReasoningText: result.ReasoningText, ToolCalls: calls, FinishReason: "stop"}
+	if len(calls) == 0 && shouldRetryQwenAgentToolCall(parsed, toolChoice, messages) {
+		if synthesized := synthesizeQwenRecoveryToolCalls(parsed, messages, tools, toolChoice, parallelToolCalls); len(synthesized) > 0 {
+			result.Content = encodeToolCallsAsXML(synthesized)
+			result.ReasoningText = ""
+		}
+	}
+	return result, state, additionalPromptChars
+}
+
+func shouldRetryQwenAgentToolCall(result parsedMimoChat, toolChoice string, messages []models.Message) bool {
+	if len(result.ToolCalls) > 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(toolChoice), "none") {
+		return false
+	}
+	if shouldRetryAgentToolCall(result, toolChoice) || looksLikeKimiFalseToolRefusal(result.CleanText) {
+		return true
+	}
+	if strings.TrimSpace(result.CleanText) == "" {
+		return true
+	}
+	if qwenTaskRequiresWorkspaceChange(messages) && qwenLooksLikeCompletion(result.CleanText) && !qwenHasWorkspaceMutation(messages) {
+		return true
+	}
+	return qwenLatestTurnRequiresExecution(messages)
+}
+
+func qwenTaskRequiresWorkspaceChange(messages []models.Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if strings.ToLower(strings.TrimSpace(messages[i].Role)) != "user" {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(services.ExtractText(messages[i].Content, false)))
+		for _, marker := range []string{
+			"implemente", "implement ", "corrija", "fix ", "edite", "edit ", "altere", "modify ",
+			"faça as alterações", "faca as alteracoes", "make the changes", "aplique as alterações", "apply the changes",
+			"crie o arquivo", "criar o arquivo", "create the file", "adicione ao projeto", "add to the project",
+			"refatore", "refactor ", "remova do código", "remova do codigo", "remove from the code",
+		} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func qwenLooksLikeCompletion(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	for _, marker := range []string{
+		"concluí", "conclui", "concluído", "concluido", "finalizei", "terminei", "pronto", "feito",
+		"resolvido", "corrigi", "ajustei", "editei", "atualizei", "implementei", "alterei", "adicionei",
+		"done", "fixed", "updated", "implemented", "changed", "completed", "finished",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func qwenHasWorkspaceMutation(messages []models.Message) bool {
+	start := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			start = i + 1
+			break
+		}
+	}
+	for _, message := range messages[start:] {
+		if strings.ToLower(strings.TrimSpace(message.Role)) != "assistant" {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			name := strings.ToLower(strings.TrimSpace(call.Function.Name))
+			for _, marker := range []string{"apply_patch", "write", "edit", "replace", "create_file", "delete", "move_file", "rename"} {
+				if strings.Contains(name, marker) {
+					return true
+				}
+			}
+			if !strings.Contains(name, "terminal") && !strings.Contains(name, "command") && !strings.Contains(name, "shell") && !strings.Contains(name, "code") && !strings.Contains(name, "python") {
+				continue
+			}
+			arguments := strings.ToLower(call.Function.Arguments)
+			for _, marker := range []string{
+				"apply_patch", "sed -i", "perl -pi", "git apply", " tee ", "cat <<", "touch ", "mkdir ",
+				" mv ", " cp ", " rm ", ">", "write_text", "writebytes", ".write(", "npm install", "pnpm add", "yarn add",
+			} {
+				if strings.Contains(arguments, marker) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func qwenLatestTurnRequiresExecution(messages []models.Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		role := strings.ToLower(strings.TrimSpace(messages[i].Role))
+		if role == "tool" || role == "function" {
+			return false
+		}
+		if role != "user" {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(services.ExtractText(messages[i].Content, false)))
+		for _, marker := range []string{
+			"use a ferramenta", "use the tool", "execute a ferramenta", "execute the tool",
+			"no projeto", "neste projeto", "nesse projeto", "no repositório", "no repositorio",
+			"in the project", "in this project", "in the repository", "in this repository",
+			"crie o arquivo", "criar o arquivo", "create the file", "edite o arquivo", "edit the file",
+			"altere o arquivo", "modify the file", "corrija no", "fix it in", "implemente no", "implement it in",
+			"rode os testes", "execute os testes", "run the tests", "execute o comando", "run the command",
+			"faça as alterações", "faca as alteracoes", "make the changes", "aplique as alterações", "apply the changes",
+		} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func buildQwenAgentToolRetryPrompt(result parsedMimoChat, messages []models.Message, tools []models.Tool) string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Type == "function" && strings.TrimSpace(tool.Function.Name) != "" {
+			names = append(names, tool.Function.Name)
+		}
+	}
+	previous := strings.TrimSpace(result.CleanText)
+	if len(previous) > 1800 {
+		previous = previous[:1800] + "...[truncated]"
+	}
+	var sb strings.Builder
+	sb.WriteString("# Agent execution correction\n")
+	sb.WriteString("Your previous response did not perform the pending action. Any plan, refusal, file path, or raw code in it was not executed by the IDE.\n")
+	sb.WriteString("Continue the same task now. If work remains, respond with exactly one <tool_call>{\"name\":\"exact_tool_name\",\"arguments\":{...}}</tool_call> and no prose. Use only one of: ")
+	sb.WriteString(strings.Join(names, ", "))
+	sb.WriteString(". Treat host tools and configured credentials as real. Only give a final answer after tool results prove completion.\n")
+	if qwenTaskRequiresWorkspaceChange(messages) && !qwenHasWorkspaceMutation(messages) {
+		sb.WriteString("So far the host transcript contains no write/edit action. Reading files, listing paths, or running checks does not implement the requested change. Use an appropriate editing or command tool now.\n")
+	}
+	if previous != "" {
+		sb.WriteString("Previous non-executed response:\n")
+		sb.WriteString(previous)
+	}
+	return sb.String()
+}
+
+func synthesizeQwenRecoveryToolCalls(result parsedMimoChat, messages []models.Message, tools []models.Tool, toolChoice string, parallelToolCalls *bool) []models.ToolCall {
+	if calls := synthesizeCodeExecutionToolCalls(result.CleanText, tools); len(calls) > 0 {
+		return calls
+	}
+	if recovered := synthesizePathReadToolCalls(result, tools, parallelToolCalls); len(recovered.ToolCalls) > 0 {
+		return recovered.ToolCalls
+	}
+	if call, ok := synthesizeRequiredZeroArgumentToolCall(toolChoice, tools); ok {
+		return []models.ToolCall{call}
+	}
+	if looksLikeKimiFalseToolRefusal(result.CleanText) || qwenLatestTurnRequiresExecution(messages) {
+		if call, ok := synthesizeWorkspaceDiscoveryToolCall(tools); ok {
+			return []models.ToolCall{call}
+		}
+	}
+	return nil
+}
+
+func encodeToolCallsAsXML(calls []models.ToolCall) string {
+	var sb strings.Builder
+	for _, call := range calls {
+		arguments := json.RawMessage(call.Function.Arguments)
+		if !json.Valid(arguments) {
+			arguments = json.RawMessage(`{}`)
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"name":      call.Function.Name,
+			"arguments": arguments,
+		})
+		sb.WriteString("<tool_call>")
+		sb.Write(payload)
+		sb.WriteString("</tool_call>")
+	}
+	return sb.String()
+}
+
+func synthesizeWorkspaceDiscoveryToolCall(tools []models.Tool) (models.ToolCall, bool) {
+	for _, preferredName := range []string{"terminal", "execute_command", "run_command", "shell", "execute_code"} {
+		for _, tool := range tools {
+			if !strings.EqualFold(strings.TrimSpace(tool.Function.Name), preferredName) {
+				continue
+			}
+			var schema map[string]interface{}
+			raw, _ := json.Marshal(tool.Function.Parameters)
+			_ = json.Unmarshal(raw, &schema)
+			properties, _ := schema["properties"].(map[string]interface{})
+			arguments := map[string]interface{}{}
+			if _, ok := properties["command"]; ok {
+				arguments["command"] = "pwd; find . -maxdepth 3 -type f -not -path './.git/*' | sort | head -200"
+			} else if _, ok := properties["code"]; ok {
+				arguments["code"] = "import os\nprint(os.getcwd())\nfor root, dirs, files in os.walk('.'):\n    dirs[:] = sorted(d for d in dirs if d != '.git')\n    if root.count(os.sep) > 3:\n        dirs[:] = []\n        continue\n    for name in sorted(files):\n        print(os.path.join(root, name))"
+			} else {
+				continue
+			}
+			required, _ := schema["required"].([]interface{})
+			valid := true
+			for _, rawName := range required {
+				name, _ := rawName.(string)
+				switch name {
+				case "command", "code":
+				case "timeout", "timeout_seconds":
+					arguments[name] = 30
+				case "cwd", "workdir":
+					arguments[name] = "."
+				default:
+					valid = false
+				}
+			}
+			if !valid {
+				continue
+			}
+			encoded, _ := json.Marshal(arguments)
+			return models.ToolCall{Type: "function", Function: models.ToolFunction{Name: tool.Function.Name, Arguments: string(encoded)}}, true
+		}
+	}
+	return models.ToolCall{}, false
 }
 
 func qwenUnsentMessages(messages []models.Message, state services.WebChatState) []models.Message {
@@ -933,10 +1246,14 @@ func qwenUnsentMessages(messages []models.Message, state services.WebChatState) 
 	}
 	if state.ClientMessageCount < len(messages) {
 		pending := messages[state.ClientMessageCount:]
-		// The first newly appended assistant message is the response already stored
-		// by Qwen in this same upstream chat. Only the user/tool turns after it are new.
+		// Ordinary assistant prose is already stored in the upstream Qwen chat.
+		// Tool-call envelopes, however, may have been normalized or synthesized by
+		// the proxy. Replay those envelopes with their tool results so Qwen always
+		// sees exactly which host action produced the observation.
 		if len(pending) > 0 && pending[0].Role == "assistant" {
-			pending = pending[1:]
+			if len(pending[0].ToolCalls) == 0 {
+				pending = pending[1:]
+			}
 		}
 		if len(pending) > 0 {
 			return pending
@@ -1451,11 +1768,18 @@ func synthesizeKimiInitialSkillDiscovery(messages []models.Message, tools []mode
 }
 
 func filterKimiAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolChoice string) []models.ToolCall {
+	return filterAllowedToolCalls(calls, tools, toolChoice)
+}
+
+func filterAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolChoice string) []models.ToolCall {
+	choice := strings.ToLower(strings.TrimSpace(toolChoice))
+	if choice == "none" {
+		return nil
+	}
 	allowed := make(map[string]bool, len(tools))
 	for _, tool := range tools {
 		allowed[strings.ToLower(strings.TrimSpace(tool.Function.Name))] = true
 	}
-	choice := strings.ToLower(strings.TrimSpace(toolChoice))
 	restrictToChoice := choice != "" && choice != "auto" && choice != "required" && choice != "any" && choice != "none"
 	filtered := make([]models.ToolCall, 0, len(calls))
 	for _, call := range calls {

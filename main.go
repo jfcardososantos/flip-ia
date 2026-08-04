@@ -681,6 +681,48 @@ func renderDashboard(c *gin.Context) {
 	})
 }
 
+func renderChat(c *gin.Context) {
+	c.HTML(http.StatusOK, "chat.html", gin.H{
+		"ProductName": "flip-ai",
+		"Models":      availableModelRows(),
+	})
+}
+
+func requireChatAccess(c *gin.Context) bool {
+	if settingsAuthenticated(c) || services.ValidateRequestAPIKey(requestAPIKeyFromRequest(c)) {
+		return true
+	}
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+		"error": gin.H{
+			"message": "Entre nas configurações para usar o chat.",
+			"type":    "authentication_error",
+		},
+	})
+	return false
+}
+
+func handleDashboardWebSearch(c *gin.Context) {
+	if !requireChatAccess(c) {
+		return
+	}
+	var input struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil || strings.TrimSpace(input.Query) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Informe uma consulta de busca."})
+		return
+	}
+	searchContext, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	results, err := services.SearchWeb(searchContext, input.Query, input.Limit)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"query": strings.TrimSpace(input.Query), "results": results})
+}
+
 func renderSettings(c *gin.Context, status int, message string, errorMessage string, authenticated bool) {
 	storedAuth, storedAuthErr := services.LoadStoredAuth()
 	c.HTML(status, "settings.html", gin.H{
@@ -700,7 +742,22 @@ func renderSettings(c *gin.Context, status int, message string, errorMessage str
 		"DefaultSource":     defaultModelSource(storedAuth),
 		"RequestAuth":       services.RequestAuthEnabled(),
 		"RequestKeySource":  requestAPIKeySource(storedAuth),
+		"Next":              settingsNextPath(c),
 	})
+}
+
+func settingsNextPath(c *gin.Context) string {
+	next := strings.TrimSpace(c.PostForm("next"))
+	if next == "" {
+		next = strings.TrimSpace(c.Query("next"))
+	}
+	if next == "" {
+		next = c.GetString("settings_next")
+	}
+	if next != "/chat" && next != "/settings" {
+		return "/settings"
+	}
+	return next
 }
 
 func decodeStringMap(raw string) (map[string]string, error) {
@@ -778,6 +835,10 @@ func inferenceAuthMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		if settingsAuthenticated(c) {
+			c.Next()
+			return
+		}
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 			"error": gin.H{
 				"message": "Missing or invalid API key",
@@ -850,6 +911,19 @@ func main() {
 
 	r.GET("/", renderDashboard)
 	r.GET("/dashboard", renderDashboard)
+	r.GET("/chat", func(c *gin.Context) {
+		if !settingsAuthenticated(c) {
+			c.Set("settings_next", "/chat")
+			message := ""
+			if settingsPassword() == "" {
+				message = "Defina SETTINGS_PASSWORD no env para habilitar o chat protegido."
+			}
+			renderSettings(c, http.StatusUnauthorized, "", message, false)
+			return
+		}
+		renderChat(c)
+	})
+	r.POST("/chat/tools/web-search", handleDashboardWebSearch)
 
 	r.GET("/settings", func(c *gin.Context) {
 		if !requireSettingsAccess(c) {
@@ -869,7 +943,7 @@ func main() {
 			return
 		}
 		setSettingsCookie(c)
-		c.Redirect(http.StatusSeeOther, "/settings")
+		c.Redirect(http.StatusSeeOther, settingsNextPath(c))
 	})
 
 	r.POST("/settings/logout", func(c *gin.Context) {

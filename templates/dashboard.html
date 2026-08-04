@@ -183,10 +183,15 @@
           <p class="muted">Dashboard operacional da API</p>
         </div>
         <nav class="nav">
+          {{if .SettingsEnabled}}
+          <a class="button primary" href="/chat">Chat</a>
+          {{else}}
+          <span class="button" aria-disabled="true">Chat sem senha</span>
+          {{end}}
           <a class="button" href="/v1/models">Modelos</a>
           <a class="button" href="/health">Health</a>
           {{if .SettingsEnabled}}
-          <a class="button primary" href="/settings">Configurações</a>
+          <a class="button" href="/settings">Configurações</a>
           {{else}}
           <span class="button" aria-disabled="true">Configurações sem senha</span>
           {{end}}

@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chat · {{.ProductName}}</title>
+    <style>
+      :root {
+        --background: #09090b;
+        --foreground: #f8fafc;
+        --muted: #94a3b8;
+        --card: #111827;
+        --border: #273244;
+        --accent: #14b8a6;
+        --accent-dark: #0f766e;
+        --accent-foreground: #031f1c;
+        --soft: #1e293b;
+        --danger: #f87171;
+        --radius: 12px;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at top left, rgba(20, 184, 166, 0.12), transparent 28rem),
+          radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.10), transparent 30rem),
+          var(--background);
+        color: var(--foreground);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      button, select, textarea { font: inherit; }
+      button, a { -webkit-tap-highlight-color: transparent; }
+      a { color: inherit; text-decoration: none; }
+      .shell { width: 100%; max-width: 1180px; min-height: 100%; margin: 0 auto; padding: 20px 24px 24px; display: flex; flex-direction: column; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+      .brand { display: flex; align-items: center; gap: 11px; }
+      .brand-mark { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; background: var(--accent); color: var(--accent-foreground); font-weight: 900; }
+      h1, p { margin: 0; }
+      h1 { font-size: 1.18rem; }
+      .muted { color: var(--muted); }
+      .nav { display: flex; gap: 8px; flex-wrap: wrap; }
+      .button {
+        min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+        border: 1px solid var(--border); border-radius: 8px; padding: 0 13px; background: var(--card);
+        color: var(--foreground); cursor: pointer;
+      }
+      .button:hover { border-color: #3b4a61; }
+      .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-foreground); font-weight: 750; }
+      .button:disabled { opacity: .55; cursor: not-allowed; }
+      .chat-card { min-height: 0; flex: 1; display: grid; grid-template-rows: auto minmax(420px, 1fr) auto; background: rgba(17, 24, 39, .94); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: 0 24px 80px rgba(0,0,0,.28); }
+      .toolbar { display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border); background: rgba(15, 23, 42, .74); }
+      .controls { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      select { max-width: 360px; min-width: 220px; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 0 34px 0 11px; background: #0f172a; color: var(--foreground); }
+      .search-toggle { display: inline-flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: .88rem; cursor: pointer; white-space: nowrap; }
+      .search-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+      .switch { width: 38px; height: 22px; border-radius: 999px; background: #334155; padding: 3px; transition: .2s; }
+      .switch::after { content: ""; display: block; width: 16px; height: 16px; border-radius: 50%; background: white; transition: .2s; }
+      .search-toggle input:checked + .switch { background: var(--accent-dark); }
+      .search-toggle input:checked + .switch::after { transform: translateX(16px); }
+      .status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .82rem; white-space: nowrap; }
+      .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.12); }
+      .status.busy .status-dot { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,.12); animation: pulse 1.2s infinite; }
+      .status.error .status-dot { background: var(--danger); box-shadow: 0 0 0 3px rgba(248,113,113,.12); }
+      @keyframes pulse { 50% { opacity: .4; } }
+      .messages { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 26px clamp(16px, 5vw, 70px); scroll-behavior: smooth; }
+      .welcome { max-width: 650px; margin: 10vh auto 0; text-align: center; }
+      .welcome-icon { width: 54px; height: 54px; display: grid; place-items: center; margin: 0 auto 16px; border: 1px solid rgba(94,234,212,.24); border-radius: 16px; background: rgba(20,184,166,.12); color: #5eead4; font-size: 1.5rem; }
+      .welcome h2 { margin: 0 0 8px; font-size: 1.42rem; }
+      .suggestions { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px; margin-top: 22px; }
+      .suggestion { padding: 12px 13px; border: 1px solid var(--border); border-radius: 10px; background: rgba(15,23,42,.74); color: #cbd5e1; text-align: left; cursor: pointer; }
+      .suggestion:hover { border-color: rgba(20,184,166,.55); color: var(--foreground); }
+      .message { display: flex; margin: 0 0 22px; animation: appear .18s ease-out; }
+      @keyframes appear { from { transform: translateY(4px); opacity: 0; } }
+      .message.user { justify-content: flex-end; }
+      .bubble { max-width: min(820px, 88%); line-height: 1.62; overflow-wrap: anywhere; }
+      .user .bubble { padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: var(--accent-dark); color: white; }
+      .assistant .bubble { width: 100%; }
+      .assistant .bubble a { color: #5eead4; text-decoration: underline; text-underline-offset: 3px; }
+      .assistant .bubble code { padding: 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: #0f172a; font-family: "SFMono-Regular", Consolas, monospace; font-size: .88em; }
+      .assistant .bubble pre { overflow: auto; margin: 12px 0; padding: 13px; border: 1px solid var(--border); border-radius: 9px; background: #020617; }
+      .assistant .bubble pre code { padding: 0; border: 0; background: transparent; }
+      .cursor::after { content: ""; display: inline-block; width: 7px; height: 1em; margin-left: 3px; vertical-align: -2px; background: var(--accent); animation: blink .8s steps(1) infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+      .tool-card { max-width: min(820px, 92%); margin: -8px 0 18px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: rgba(15,23,42,.75); color: #cbd5e1; }
+      .tool-head { display: flex; align-items: center; gap: 8px; font-size: .88rem; }
+      .tool-spinner { width: 14px; height: 14px; border: 2px solid #334155; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+      .tool-card.done .tool-spinner { border: 0; animation: none; }
+      .tool-card.done .tool-spinner::after { content: "✓"; color: #5eead4; font-weight: 800; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .sources { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+      .source { max-width: 220px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); font-size: .76rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .source:hover { color: #5eead4; border-color: rgba(20,184,166,.45); }
+      .composer-wrap { padding: 13px 14px 11px; border-top: 1px solid var(--border); background: rgba(9,9,11,.58); }
+      .composer { display: flex; align-items: flex-end; gap: 10px; max-width: 920px; margin: 0 auto; padding: 9px 9px 9px 13px; border: 1px solid var(--border); border-radius: 13px; background: #0f172a; }
+      .composer:focus-within { border-color: rgba(20,184,166,.62); box-shadow: 0 0 0 3px rgba(20,184,166,.08); }
+      textarea { flex: 1; min-height: 40px; max-height: 180px; resize: none; border: 0; outline: 0; padding: 9px 0 5px; background: transparent; color: var(--foreground); line-height: 1.45; }
+      textarea::placeholder { color: #64748b; }
+      .send { width: 40px; height: 40px; flex: 0 0 40px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-foreground); font-size: 1.05rem; font-weight: 900; cursor: pointer; }
+      .send:disabled { opacity: .42; cursor: not-allowed; }
+      .hint { margin-top: 7px; text-align: center; color: #64748b; font-size: .73rem; }
+      @media (max-width: 720px) {
+        .shell { padding: 12px 10px; }
+        .topbar { align-items: flex-start; }
+        .brand p { display: none; }
+        .nav .settings-link { display: none; }
+        .chat-card { grid-template-rows: auto minmax(360px, 1fr) auto; }
+        .toolbar { align-items: flex-start; flex-direction: column; }
+        .controls { width: 100%; align-items: stretch; flex-direction: column; }
+        select { max-width: none; width: 100%; }
+        .toolbar-right { width: 100%; display: flex; justify-content: space-between; }
+        .messages { padding: 20px 14px; }
+        .suggestions { grid-template-columns: 1fr; }
+        .welcome { margin-top: 5vh; }
+        .bubble { max-width: 94%; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">f</span>
+          <div><h1>{{.ProductName}} chat</h1><p class="muted">Conversa, pesquisa e respostas em tempo real</p></div>
+        </div>
+        <nav class="nav">
+          <a class="button" href="/dashboard">Dashboard</a>
+          <a class="button settings-link" href="/settings">Configurações</a>
+        </nav>
+      </header>
+
+      <section class="chat-card">
+        <div class="toolbar">
+          <div class="controls">
+            <select id="model" aria-label="Modelo">
+              {{range .Models}}<option value="{{.ID}}">{{.ID}} · {{.Provider}}</option>{{end}}
+            </select>
+            <label class="search-toggle" title="Permite que o modelo pesquise fontes atuais na internet">
+              <input id="web-search" type="checkbox" checked>
+              <span class="switch"></span>
+              Busca na internet
+            </label>
+          </div>
+          <div class="toolbar-right">
+            <span class="status" id="status"><span class="status-dot"></span><span id="status-label">Pronto</span></span>
+            <button class="button" id="new-chat" type="button">Nova conversa</button>
+          </div>
+        </div>
+
+        <div class="messages" id="messages" aria-live="polite">
+          <div class="welcome" id="welcome">
+            <div class="welcome-icon">⌕</div>
+            <h2>Como posso ajudar?</h2>
+            <p class="muted">Escolha um modelo e converse. A busca está ligada e será executada quando a pergunta precisar de informações atuais.</p>
+            <div class="suggestions">
+              <button class="suggestion" type="button">Quais foram as principais notícias de tecnologia hoje?</button>
+              <button class="suggestion" type="button">Pesquise e compare os modelos de IA lançados recentemente.</button>
+              <button class="suggestion" type="button">Qual a previsão do tempo e os eventos desta semana em Barreiras?</button>
+              <button class="suggestion" type="button">Encontre fontes oficiais sobre inteligência artificial na educação.</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <form class="composer" id="composer">
+            <textarea id="prompt" rows="1" placeholder="Pergunte qualquer coisa…" aria-label="Mensagem"></textarea>
+            <button class="send" id="send" type="submit" aria-label="Enviar">↑</button>
+          </form>
+          <p class="hint">A IA pode cometer erros. Confira as fontes e informações importantes.</p>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const messagesNode = document.getElementById('messages');
+      const promptNode = document.getElementById('prompt');
+      const sendNode = document.getElementById('send');
+      const modelNode = document.getElementById('model');
+      const searchNode = document.getElementById('web-search');
+      const statusNode = document.getElementById('status');
+      const statusLabelNode = document.getElementById('status-label');
+      let conversation = [];
+      let running = false;
+      let controller = null;
+      let sessionID = makeID();
+
+      function makeID() {
+        return self.crypto && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now();
+      }
+
+      function escapeHTML(value) {
+        return String(value || '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+      }
+
+      function renderText(value) {
+        const codeBlocks = [];
+        let html = escapeHTML(value).replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_, language, code) => {
+          const marker = `@@FLIP_CODE_${codeBlocks.length}@@`;
+          codeBlocks.push(`<pre><code data-language="${escapeHTML(language)}">${code.trim()}</code></pre>`);
+          return marker;
+        });
+        html = html
+          .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+          .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+          .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+          .replace(/\n/g, '<br>');
+        codeBlocks.forEach((block, index) => { html = html.replace(`@@FLIP_CODE_${index}@@`, block); });
+        return html;
+      }
+
+      function setStatus(label, state = '') {
+        statusLabelNode.textContent = label;
+        statusNode.className = `status ${state}`.trim();
+      }
+
+      function scrollToEnd() {
+        messagesNode.scrollTop = messagesNode.scrollHeight;
+      }
+
+      function addMessage(role, text, streaming = false) {
+        const welcome = document.getElementById('welcome');
+        if (welcome) welcome.remove();
+        const row = document.createElement('div');
+        row.className = `message ${role}`;
+        const bubble = document.createElement('div');
+        bubble.className = `bubble${streaming ? ' cursor' : ''}`;
+        bubble.innerHTML = role === 'assistant' ? renderText(text) : escapeHTML(text).replace(/\n/g, '<br>');
+        row.appendChild(bubble);
+        messagesNode.appendChild(row);
+        scrollToEnd();
+        return {row, bubble};
+      }
+
+      function addToolCard(label) {
+        const card = document.createElement('div');
+        card.className = 'tool-card';
+        card.innerHTML = `<div class="tool-head"><span class="tool-spinner"></span><span>${escapeHTML(label)}</span></div>`;
+        messagesNode.appendChild(card);
+        scrollToEnd();
+        return card;
+      }
+
+      function finishToolCard(card, label, results = []) {
+        card.classList.add('done');
+        card.querySelector('.tool-head span:last-child').textContent = label;
+        if (results.length) {
+          const sources = document.createElement('div');
+          sources.className = 'sources';
+          results.slice(0, 6).forEach(item => {
+            const link = document.createElement('a');
+            link.className = 'source';
+            link.href = item.url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = item.title || item.url;
+            sources.appendChild(link);
+          });
+          card.appendChild(sources);
+        }
+        scrollToEnd();
+      }
+
+      function toolDefinitions() {
+        if (!searchNode.checked) return [];
+        return [
+          {
+            type: 'function',
+            function: {
+              name: 'web_search',
+              description: 'Pesquisa informações atuais na internet. Use para notícias, fatos recentes, preços, clima, eventos ou quando fontes online melhorarem a resposta.',
+              parameters: {type: 'object', properties: {query: {type: 'string', description: 'Consulta objetiva de busca'}}, required: ['query']}
+            }
+          },
+          {
+            type: 'function',
+            function: {
+              name: 'get_current_time',
+              description: 'Obtém a data e o horário atuais do navegador do usuário.',
+              parameters: {type: 'object', properties: {}}
+            }
+          }
+        ];
+      }
+
+      function systemPrompt() {
+        const today = new Intl.DateTimeFormat('pt-BR', {dateStyle: 'full', timeStyle: 'short'}).format(new Date());
+        const searchInstruction = searchNode.checked
+          ? 'Você possui a ferramenta web_search. Use-a sempre que a pergunta depender de informação atual, externa ou verificável. Depois da busca, responda em português e cite as fontes relevantes como links Markdown.'
+          : 'A busca na internet está desligada. Avise brevemente se uma resposta exigir informações atuais que você não possa verificar.';
+        return `Você é o assistente do chat flip-ai. Data e hora do usuário: ${today}. ${searchInstruction} Seja direto, útil e não invente que executou ferramentas.`;
+      }
+
+      async function executeTool(call) {
+        let args = {};
+        try { args = JSON.parse(call.function.arguments || '{}'); } catch (_) {
+          return JSON.stringify({error: 'Argumentos inválidos na chamada da ferramenta.'});
+        }
+        if (call.function.name === 'get_current_time') {
+          const card = addToolCard('Consultando data e horário…');
+          const result = {iso: new Date().toISOString(), local: new Date().toLocaleString('pt-BR'), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone};
+          finishToolCard(card, `Horário consultado: ${result.local}`);
+          return JSON.stringify(result);
+        }
+        if (call.function.name !== 'web_search') {
+          return JSON.stringify({error: `Ferramenta não disponível: ${call.function.name}`});
+        }
+        const query = String(args.query || '').trim();
+        const card = addToolCard(query ? `Pesquisando “${query}”…` : 'Pesquisando na internet…');
+        try {
+          const response = await fetch('/chat/tools/web-search', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query, limit: 6}),
+            signal: controller.signal
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || `Busca falhou (HTTP ${response.status})`);
+          finishToolCard(card, `${data.results.length} fontes encontradas`, data.results);
+          return JSON.stringify(data);
+        } catch (error) {
+          finishToolCard(card, `Busca falhou: ${error.message}`);
+          return JSON.stringify({error: error.message, query});
+        }
+      }
+
+      async function streamModel(requestMessages) {
+        const tools = toolDefinitions();
+        const payload = {
+          model: modelNode.value,
+          messages: [{role: 'system', content: systemPrompt()}, ...requestMessages],
+          stream: true,
+          user: `dashboard-chat-${sessionID}`
+        };
+        if (tools.length) {
+          payload.tools = tools;
+          payload.tool_choice = 'auto';
+          payload.parallel_tool_calls = false;
+        }
+        const response = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          const errorBody = await response.json().catch(() => ({}));
+          throw new Error(errorBody.error?.message || errorBody.error || `A API respondeu HTTP ${response.status}`);
+        }
+        if (!response.body) throw new Error('A resposta não possui stream.');
+
+        const pending = new Map();
+        let content = '';
+        let row = null;
+        let buffer = '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, {stream: true});
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            let event;
+            try { event = JSON.parse(data); } catch (_) { continue; }
+            if (event.error) throw new Error(event.error.message || String(event.error));
+            const delta = event.choices?.[0]?.delta || {};
+            if (delta.content) {
+              content += delta.content;
+              if (!row) row = addMessage('assistant', '', true);
+              row.bubble.innerHTML = renderText(content);
+              row.bubble.classList.add('cursor');
+              scrollToEnd();
+            }
+            for (const part of delta.tool_calls || []) {
+              const index = Number.isInteger(part.index) ? part.index : pending.size;
+              const current = pending.get(index) || {id: '', type: 'function', function: {name: '', arguments: ''}};
+              if (part.id) current.id = part.id;
+              if (part.type) current.type = part.type;
+              if (part.function?.name) current.function.name += part.function.name;
+              if (part.function?.arguments) current.function.arguments += part.function.arguments;
+              pending.set(index, current);
+            }
+          }
+        }
+        if (row) row.bubble.classList.remove('cursor');
+        return {content, toolCalls: [...pending.values()]};
+      }
+
+      async function runAgent() {
+        for (let round = 0; round < 6; round++) {
+          setStatus(round ? 'Analisando fontes…' : 'Pensando…', 'busy');
+          const result = await streamModel(conversation);
+          if (!result.toolCalls.length) {
+            if (!result.content.trim()) throw new Error('O modelo não devolveu conteúdo.');
+            conversation.push({role: 'assistant', content: result.content});
+            return;
+          }
+          conversation.push({role: 'assistant', content: result.content || '', tool_calls: result.toolCalls});
+          for (const call of result.toolCalls) {
+            setStatus(call.function.name === 'web_search' ? 'Pesquisando…' : 'Executando ferramenta…', 'busy');
+            const output = await executeTool(call);
+            conversation.push({role: 'tool', tool_call_id: call.id, name: call.function.name, content: output});
+          }
+        }
+        throw new Error('A conversa excedeu o limite de etapas de ferramentas.');
+      }
+
+      async function submitPrompt(text) {
+        text = String(text || '').trim();
+        if (!text || running) return;
+        running = true;
+        controller = new AbortController();
+        sendNode.disabled = true;
+        modelNode.disabled = true;
+        searchNode.disabled = true;
+        addMessage('user', text);
+        conversation.push({role: 'user', content: text});
+        promptNode.value = '';
+        resizePrompt();
+        try {
+          await runAgent();
+          setStatus('Pronto');
+        } catch (error) {
+          if (error.name !== 'AbortError') {
+            addMessage('assistant', `Não consegui concluir: ${error.message}`);
+            setStatus('Erro', 'error');
+          }
+        } finally {
+          running = false;
+          controller = null;
+          sendNode.disabled = false;
+          modelNode.disabled = false;
+          searchNode.disabled = false;
+          promptNode.focus();
+        }
+      }
+
+      function resizePrompt() {
+        promptNode.style.height = 'auto';
+        promptNode.style.height = `${Math.min(promptNode.scrollHeight, 180)}px`;
+      }
+
+      document.getElementById('composer').addEventListener('submit', event => {
+        event.preventDefault();
+        submitPrompt(promptNode.value);
+      });
+      promptNode.addEventListener('input', resizePrompt);
+      promptNode.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          submitPrompt(promptNode.value);
+        }
+      });
+      document.querySelectorAll('.suggestion').forEach(button => button.addEventListener('click', () => submitPrompt(button.textContent)));
+      modelNode.addEventListener('change', () => { sessionID = makeID(); });
+      searchNode.addEventListener('change', () => { sessionID = makeID(); });
+      document.getElementById('new-chat').addEventListener('click', () => {
+        if (running && controller) controller.abort();
+        conversation = [];
+        sessionID = makeID();
+        messagesNode.innerHTML = `<div class="welcome" id="welcome"><div class="welcome-icon">⌕</div><h2>Nova conversa</h2><p class="muted">Envie uma mensagem para começar.</p></div>`;
+        setStatus('Pronto');
+        promptNode.focus();
+      });
+    </script>
+  </body>
+</html>

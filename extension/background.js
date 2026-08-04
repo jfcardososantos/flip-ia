@@ -2,6 +2,9 @@ const QWEN_URL = "https://chat.qwen.ai/";
 const QWEN_TAB_PATTERNS = ["https://chat.qwen.ai/*", "https://chat.qwenlm.ai/*"];
 
 let relayGeneration = 0;
+let relayActiveGeneration = 0;
+let relayLastActivityAt = 0;
+let relayJobInProgress = false;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -383,6 +386,8 @@ async function handleRelayJob(config, job) {
 }
 
 async function runRelayLoop(generation) {
+	relayActiveGeneration = generation;
+	relayLastActivityAt = Date.now();
   let resetSent = false;
   while (generation === relayGeneration) {
     const config = await relayConfig();
@@ -391,6 +396,7 @@ async function runRelayLoop(generation) {
       continue;
     }
     try {
+	  relayLastActivityAt = Date.now();
       if (!resetSent) {
         const resetResponse = await fetch(`${config.proxyUrl}/auth/qwen/relay/reset`, {
           method: "POST",
@@ -399,12 +405,15 @@ async function runRelayLoop(generation) {
         });
         if (!resetResponse.ok) throw new Error(`Falha ao reiniciar a ponte Qwen: HTTP ${resetResponse.status}`);
         resetSent = true;
+		relayLastActivityAt = Date.now();
       }
       const response = await fetch(`${config.proxyUrl}/auth/qwen/relay/next`, {
         method: "GET",
         headers: adminHeaders(config.apiKey),
         cache: "no-store"
       });
+	  if (generation !== relayGeneration) return;
+	  relayLastActivityAt = Date.now();
       if (response.status === 204) continue;
       if (!response.ok) {
         await chrome.storage.local.set({ qwenRelayError: `HTTP ${response.status}`, qwenRelaySeenAt: Date.now() });
@@ -413,7 +422,13 @@ async function runRelayLoop(generation) {
       }
       const job = await response.json();
       await chrome.storage.local.set({ qwenRelayError: "", qwenRelaySeenAt: Date.now() });
-      await handleRelayJob(config, job);
+      relayJobInProgress = true;
+      try {
+        await handleRelayJob(config, job);
+      } finally {
+        relayJobInProgress = false;
+        relayLastActivityAt = Date.now();
+      }
     } catch (error) {
       await chrome.storage.local.set({
         qwenRelayError: error && error.message ? error.message : String(error),
@@ -426,6 +441,8 @@ async function runRelayLoop(generation) {
 
 function restartRelay() {
   relayGeneration += 1;
+	relayActiveGeneration = relayGeneration;
+	relayLastActivityAt = Date.now();
   void qwenTab().catch(() => {});
   void runRelayLoop(relayGeneration);
 }
@@ -446,7 +463,9 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 chrome.alarms.create("qwen-relay-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "qwen-relay-keepalive" && relayGeneration === 0) restartRelay();
+  if (alarm.name !== "qwen-relay-keepalive") return;
+  const stale = Date.now() - relayLastActivityAt > 45000;
+  if (relayGeneration === 0 || relayActiveGeneration !== relayGeneration || (stale && !relayJobInProgress)) restartRelay();
 });
 
 restartRelay();

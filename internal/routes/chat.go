@@ -1219,17 +1219,23 @@ func buildQwenAgentToolRetryPrompt(result parsedMimoChat, messages []models.Mess
 
 func synthesizeQwenRecoveryToolCalls(result parsedMimoChat, messages []models.Message, tools []models.Tool, toolChoice string, parallelToolCalls *bool) []models.ToolCall {
 	if calls := synthesizeCodeExecutionToolCalls(result.CleanText, tools); len(calls) > 0 {
-		return calls
+		if filtered := filterAllowedToolCalls(calls, tools, toolChoice); len(filtered) > 0 {
+			return filtered
+		}
 	}
 	if recovered := synthesizePathReadToolCalls(result, tools, parallelToolCalls); len(recovered.ToolCalls) > 0 {
-		return recovered.ToolCalls
+		if filtered := filterAllowedToolCalls(recovered.ToolCalls, tools, toolChoice); len(filtered) > 0 {
+			return filtered
+		}
 	}
 	if call, ok := synthesizeRequiredZeroArgumentToolCall(toolChoice, tools); ok {
 		return []models.ToolCall{call}
 	}
 	if looksLikeKimiFalseToolRefusal(result.CleanText) || qwenLatestTurnRequiresExecution(messages) {
 		if call, ok := synthesizeWorkspaceDiscoveryToolCall(tools); ok {
-			return []models.ToolCall{call}
+			if filtered := filterAllowedToolCalls([]models.ToolCall{call}, tools, toolChoice); len(filtered) > 0 {
+				return filtered
+			}
 		}
 	}
 	return nil

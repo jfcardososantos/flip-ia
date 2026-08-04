@@ -132,6 +132,18 @@ func TestSynthesizeWorkspaceDiscoveryUsesAvailableTerminal(t *testing.T) {
 	}
 }
 
+func TestQwenRecoverySynthesisRespectsNamedToolChoice(t *testing.T) {
+	tools := []models.Tool{
+		{Type: "function", Function: models.ToolDefinition{Name: "read_file", Parameters: map[string]interface{}{"properties": map[string]interface{}{"path": map[string]interface{}{}}, "required": []interface{}{"path"}}}},
+		{Type: "function", Function: models.ToolDefinition{Name: "terminal", Parameters: map[string]interface{}{"properties": map[string]interface{}{"command": map[string]interface{}{}}, "required": []interface{}{"command"}}}},
+	}
+	result := parsedMimoChat{CleanText: "Não consigo acessar o projeto."}
+	messages := []models.Message{{Role: "user", Content: "Use a ferramenta e leia o arquivo."}}
+	if calls := synthesizeQwenRecoveryToolCalls(result, messages, tools, "read_file", nil); len(calls) != 0 {
+		t.Fatalf("fallback must not violate named tool_choice: %+v", calls)
+	}
+}
+
 func TestFilterAllowedToolCallsForQwenRejectsInventedCommand(t *testing.T) {
 	tools := []models.Tool{{Type: "function", Function: models.ToolDefinition{Name: "terminal"}}}
 	calls := []models.ToolCall{

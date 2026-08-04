@@ -82,9 +82,11 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			if payload["chat_id"] != "chat_1" || payload["model"] != "qwen3.7-plus" {
 				t.Errorf("unexpected completion payload: %+v", payload)
 			}
-			nestedHeaders, _ := payload["headers"].(map[string]interface{})
-			if nestedHeaders["X-Request-Id"] == "" || nestedHeaders["X-Request-Id"] != r.Header.Get("X-Request-Id") {
-				t.Errorf("payload and HTTP request IDs must match: payload=%+v header=%q", nestedHeaders, r.Header.Get("X-Request-Id"))
+			if _, exists := payload["headers"]; exists {
+				t.Errorf("client-only headers must not be serialized into the Qwen JSON payload: %+v", payload)
+			}
+			if r.Header.Get("X-Request-Id") == "" {
+				t.Error("Qwen HTTP request is missing X-Request-Id")
 			}
 			if payload["parent_id"] != nil {
 				t.Errorf("new chat parent_id = %#v; want null", payload["parent_id"])

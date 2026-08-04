@@ -70,12 +70,13 @@ async function executeQwenJob(job) {
         if (baxia && baxia.baxiaPromptInit && fy && typeof fy.getUidToken === "function") break;
         await sleep(250);
       }
-      const response = await window.fetch(relayJob.url, {
+      const requestOptions = {
         method: relayJob.method || "POST",
         credentials: "include",
         headers: relayJob.headers || {},
         body: relayJob.body || undefined
-      });
+      };
+      const response = await window.fetch(relayJob.url, requestOptions);
       const responseHeaders = {};
       response.headers.forEach((value, key) => {
         responseHeaders[key] = value;
@@ -83,7 +84,13 @@ async function executeQwenJob(job) {
       return {
         status: response.status,
         headers: responseHeaders,
-        body: await response.text()
+        body: await response.text(),
+        debug: {
+          baxiaReady: Boolean(window.__baxia__ && window.__baxia__.baxiaPromptInit),
+          bxUA: Boolean(requestOptions.headers && (requestOptions.headers["bx-ua"] || requestOptions.headers.get && requestOptions.headers.get("bx-ua"))),
+          bxUmid: Boolean(requestOptions.headers && (requestOptions.headers["bx-umidtoken"] || requestOptions.headers.get && requestOptions.headers.get("bx-umidtoken"))),
+          bxVersion: Boolean(requestOptions.headers && (requestOptions.headers["bx-v"] || requestOptions.headers.get && requestOptions.headers.get("bx-v")))
+        }
       };
     }
   });
@@ -107,6 +114,9 @@ async function handleRelayJob(config, job) {
   let payload;
   try {
     const result = await executeQwenJob(job);
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`Qwen HTTP ${result.status}; Baxia=${JSON.stringify(result.debug || {})}; body=${String(result.body || "").slice(0, 500)}`);
+    }
     payload = {
       job_id: job.id,
       status: result.status,

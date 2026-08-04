@@ -253,7 +253,6 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 		"parent_id":          parentParam,
 		"messages":           []interface{}{message},
 		"timestamp":          now.Unix(),
-		"headers":            map[string]string{"X-Request-Id": requestID},
 	}
 	if profile.SupportsUsage {
 		payload["stream_options"] = map[string]bool{"include_usage": true}

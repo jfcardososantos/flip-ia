@@ -162,6 +162,7 @@ func IsQwenTransientError(err error) bool {
 	body := strings.ToLower(err.Error())
 	return strings.Contains(body, "empty stream") ||
 		strings.Contains(body, "stream error") ||
+		strings.Contains(body, "browser relay") ||
 		strings.Contains(body, "timeout") ||
 		strings.Contains(body, "connection reset") ||
 		strings.Contains(body, "unexpected eof")
@@ -348,6 +349,10 @@ func qwenRequest(session StoredWebSession, method, path string, payload interfac
 }
 
 func qwenRequestWithID(session StoredWebSession, method, path string, payload interface{}, requestID string) (*http.Response, error) {
+	headers := qwenHeaders(session)
+	if strings.HasPrefix(path, "/api/") && QwenBrowserRelayAvailable() {
+		return QwenBrowserRelayRequest(method, path, payload, headers)
+	}
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -360,7 +365,7 @@ func qwenRequestWithID(session StoredWebSession, method, path string, payload in
 	if err != nil {
 		return nil, err
 	}
-	for key, value := range qwenHeaders(session) {
+	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
 	request.Header.Set("X-Request-Id", requestID)

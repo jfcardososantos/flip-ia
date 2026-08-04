@@ -342,6 +342,8 @@ QWEN_WEB_USE_AUTHORIZATION=false
 Como esse adapter usa a sessão web, mudanças do site ou verificações anti-bot podem exigir abrir o Qwen no Chrome e importar a sessão novamente.
 No modo web, a Qwen autentica pelas cookies da sessão e o proxy não envia `Authorization` por padrão. Ative `QWEN_WEB_USE_AUTHORIZATION=true` somente se estiver reproduzindo um cliente desktop que realmente envie esse header. Sem `QWEN_WEB_DEFAULT_MODEL` e `QWEN_WEB_VERSION`, o proxy acompanha automaticamente o modelo principal ativo e a versão do frontend publicados pelo site oficial.
 
+As gerações atuais do Qwen Web são protegidas por sinais Baxia/AWSC calculados no navegador para cada requisição. A extensão 1.3 mantém uma ponte autenticada em segundo plano: deixe o Chrome aberto e uma sessão válida no `chat.qwen.ai`; Hermes e Kilo continuam chamando somente a API OpenAI-compatible do proxy. Se a ponte não estiver conectada, o adapter tenta o transporte direto por compatibilidade.
+
 Para garantir que várias chamadas continuem exatamente no mesmo chat Qwen, envie um valor estável em `user`:
 
 ```json

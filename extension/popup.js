@@ -399,10 +399,12 @@ async function importKimiSession() {
 
 async function importQwenSession() {
   const proxyUrl = normalizeProxyUrl(proxyUrlInput.value);
+  const apiKey = apiKeyInput.value.trim();
   if (!proxyUrl) {
     setStatus("Informe a URL do proxy antes de importar.");
     return;
   }
+  await chrome.storage.local.set({ proxyUrl, apiKey });
   setStatus("Lendo cookies, token e dados da aba do Qwen...");
   try {
     const [rawCookie, browserSession] = await Promise.all([
@@ -434,6 +436,7 @@ async function importQwenSession() {
       })
     });
     const bodyText = await response.text();
+    if (response.ok) chrome.runtime.sendMessage({ type: "restart-qwen-relay" });
     setStatus(`HTTP ${response.status} ${response.statusText}\n\n${bodyText}`);
   } catch (error) {
     setStatus(`Falha ao importar a sessão Qwen.\n\n${error.message || String(error)}`);

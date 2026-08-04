@@ -1099,12 +1099,48 @@ func main() {
 				"REQUEST_API_KEY":         maskValue(stored.RequestAPIKey),
 			},
 			"webSessions": maskedWebSessions(stored),
+			"qwenRelay":   services.QwenBrowserRelayStatus(),
 			"selectedAuth": gin.H{
 				"token":  maskValue(auth.Token),
 				"userID": maskValue(auth.UserID),
 				"ph":     maskValue(auth.Ph),
 			},
 		})
+	})
+
+	r.GET("/auth/qwen/relay/status", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		c.JSON(http.StatusOK, services.QwenBrowserRelayStatus())
+	})
+
+	r.GET("/auth/qwen/relay/next", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		job, ok := services.WaitNextQwenBrowserRelayJob(c.Request.Context(), 25*time.Second)
+		if !ok {
+			c.Status(http.StatusNoContent)
+			return
+		}
+		c.JSON(http.StatusOK, job)
+	})
+
+	r.POST("/auth/qwen/relay/result", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		var result services.QwenBrowserRelayResult
+		if err := c.ShouldBindJSON(&result); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Qwen relay result", "details": err.Error()})
+			return
+		}
+		if err := services.CompleteQwenBrowserRelayJob(result); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"accepted": true})
 	})
 
 	r.POST("/auth/extension/import", func(c *gin.Context) {

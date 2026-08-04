@@ -50,7 +50,7 @@ func TestQwenBrowserRelayRoundTrip(t *testing.T) {
 	}
 	responseCh := make(chan requestResult, 1)
 	go func() {
-		response, err := QwenBrowserRelayRequest(http.MethodPost, "/api/chat/completions?chat_id=1", map[string]string{"hello": "world"}, map[string]string{
+		response, err := QwenBrowserRelayRequest(http.MethodPost, "/api/v2/chat/completions?chat_id=1", map[string]string{"hello": "world"}, map[string]string{
 			"Content-Type": "application/json", "Cookie": "must-not-leak", "Version": "0.2.81",
 		})
 		responseCh <- requestResult{response: response, err: err}

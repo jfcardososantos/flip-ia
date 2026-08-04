@@ -69,11 +69,11 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			t.Errorf("web requests must not send authorization by default: %q", r.Header.Get("Authorization"))
 		}
 		switch r.URL.Path {
-		case "/api/chats/new":
+		case "/api/v2/chats/new":
 			createCalled = true
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"chat_1"}}`))
-		case "/api/chat/completions":
+		case "/api/v2/chat/completions":
 			completionCalled = true
 			var payload map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -115,7 +115,7 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			_, _ = w.Write([]byte("data: {\"response.created\":{\"chat_id\":\"chat_1\",\"parent_id\":\"user_1\",\"response_id\":\"assistant_1\"}}\n\n"))
 			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"phase\":\"answer\",\"content\":\"ready\"}}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"done\":true}\n\n"))
-		case "/api/chats/chat_1":
+		case "/api/v2/chats/chat_1":
 			updateCalled = true
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true}`))

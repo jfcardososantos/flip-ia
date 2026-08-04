@@ -258,7 +258,7 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 		payload["stream_options"] = map[string]bool{"include_usage": true}
 	}
 
-	response, err := qwenRequestWithID(session, http.MethodPost, "/api/chat/completions?chat_id="+state.ChatID, payload, requestID)
+	response, err := qwenRequestWithID(session, http.MethodPost, "/api/v2/chat/completions?chat_id="+state.ChatID, payload, requestID)
 	if err != nil {
 		return models.DeepSeekChatResult{}, state, err
 	}
@@ -294,7 +294,7 @@ func createQwenChat(session StoredWebSession, model string) (string, error) {
 		"chat_type":  "t2t",
 		"chat_mode":  "normal",
 	}
-	response, err := qwenRequest(session, http.MethodPost, "/api/chats/new", payload)
+	response, err := qwenRequest(session, http.MethodPost, "/api/v2/chats/new", payload)
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +331,7 @@ func updateQwenChat(session StoredWebSession, state WebChatState) error {
 	if len(payload) == 0 {
 		return nil
 	}
-	response, err := qwenRequest(session, http.MethodPost, "/api/chats/"+state.ChatID, payload)
+	response, err := qwenRequest(session, http.MethodPost, "/api/v2/chats/"+state.ChatID, payload)
 	if err != nil {
 		return err
 	}

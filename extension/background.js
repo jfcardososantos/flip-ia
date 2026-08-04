@@ -53,7 +53,74 @@ async function qwenTab() {
   }
   if (!tab || !tab.id) throw new Error("Não foi possível abrir a aba autenticada do Qwen.");
   await waitForTab(tab.id);
+  await installQwenRequestCapture(tab.id);
   return tab;
+}
+
+async function installQwenRequestCapture(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      if (window.__flipAiQwenCaptureInstalled) return;
+      window.__flipAiQwenCaptureInstalled = true;
+      const storageKey = "__flip_ai_qwen_request_template_v1";
+      const isCompletion = (value) => String(value || "").includes("/chat/completions");
+      const saveTemplate = (rawBody) => {
+        if (typeof rawBody !== "string" || !rawBody.trim()) return;
+        try {
+          const template = JSON.parse(rawBody);
+          template.chatId = "";
+          template.chat_id = "";
+          template.parentId = "";
+          template.parent_id = null;
+          template.timestamp = 0;
+          if (Array.isArray(template.messages)) {
+            template.messages = template.messages.slice(0, 1).map((message) => ({
+              ...message,
+              id: null,
+              fid: "",
+              parentId: null,
+              parent_id: null,
+              content: "",
+              files: [],
+              timestamp: 0
+            }));
+          }
+          localStorage.setItem(storageKey, JSON.stringify(template));
+        } catch (_error) {
+          // Ignore non-JSON requests.
+        }
+      };
+
+      const pageFetch = window.fetch;
+      window.fetch = async function(input, init) {
+        const url = typeof input === "string" ? input : input && input.url;
+        const rawBody = init && init.body;
+        const response = await pageFetch.apply(this, arguments);
+        if (isCompletion(url) && response && response.ok) saveTemplate(rawBody);
+        return response;
+      };
+
+      const xhr = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+      if (xhr) {
+        const pageOpen = xhr.open;
+        const pageSend = xhr.send;
+        xhr.open = function(method, url) {
+          this.__flipAiQwenURL = url;
+          return pageOpen.apply(this, arguments);
+        };
+        xhr.send = function(body) {
+          if (isCompletion(this.__flipAiQwenURL)) {
+            this.addEventListener("loadend", () => {
+              if (this.status >= 200 && this.status < 300) saveTemplate(body);
+            }, { once: true });
+          }
+          return pageSend.apply(this, arguments);
+        };
+      }
+    }
+  });
 }
 
 async function executeQwenJob(job) {
@@ -70,11 +137,40 @@ async function executeQwenJob(job) {
         if (baxia && baxia.baxiaPromptInit && fy && typeof fy.getUidToken === "function") break;
         await sleep(250);
       }
+      let requestBody = relayJob.body || undefined;
+      let templateApplied = false;
+      if (String(relayJob.url || "").includes("/chat/completions") && requestBody) {
+        try {
+          const incoming = JSON.parse(requestBody);
+          const template = JSON.parse(localStorage.getItem("__flip_ai_qwen_request_template_v1") || "null");
+          if (template && typeof template === "object" && Array.isArray(template.messages) && template.messages[0]) {
+            const merged = structuredClone(template);
+            for (const key of ["stream", "version", "incremental_output", "chatId", "parentId", "chat_id", "chat_mode", "model", "parent_id", "timestamp"]) {
+              if (Object.prototype.hasOwnProperty.call(merged, key) && Object.prototype.hasOwnProperty.call(incoming, key)) {
+                merged[key] = incoming[key];
+              }
+            }
+            const sourceMessage = Array.isArray(incoming.messages) ? incoming.messages[0] : null;
+            const targetMessage = merged.messages[0];
+            if (sourceMessage) {
+              for (const key of ["id", "fid", "parentId", "parent_id", "childrenIds", "role", "content", "user_action", "files", "timestamp", "models", "model", "chat_type", "sub_chat_type"]) {
+                if (Object.prototype.hasOwnProperty.call(targetMessage, key) && Object.prototype.hasOwnProperty.call(sourceMessage, key)) {
+                  targetMessage[key] = sourceMessage[key];
+                }
+              }
+            }
+            requestBody = JSON.stringify(merged);
+            templateApplied = true;
+          }
+        } catch (_error) {
+          // Fall back to the adapter payload until a valid official template exists.
+        }
+      }
       const requestOptions = {
         method: relayJob.method || "POST",
         credentials: "include",
         headers: relayJob.headers || {},
-        body: relayJob.body || undefined
+        body: requestBody
       };
       const response = await window.fetch(relayJob.url, requestOptions);
       const responseHeaders = {};
@@ -89,7 +185,8 @@ async function executeQwenJob(job) {
           baxiaReady: Boolean(window.__baxia__ && window.__baxia__.baxiaPromptInit),
           bxUA: Boolean(requestOptions.headers && (requestOptions.headers["bx-ua"] || requestOptions.headers.get && requestOptions.headers.get("bx-ua"))),
           bxUmid: Boolean(requestOptions.headers && (requestOptions.headers["bx-umidtoken"] || requestOptions.headers.get && requestOptions.headers.get("bx-umidtoken"))),
-          bxVersion: Boolean(requestOptions.headers && (requestOptions.headers["bx-v"] || requestOptions.headers.get && requestOptions.headers.get("bx-v")))
+          bxVersion: Boolean(requestOptions.headers && (requestOptions.headers["bx-v"] || requestOptions.headers.get && requestOptions.headers.get("bx-v"))),
+          templateApplied
         }
       };
     }
@@ -169,8 +266,15 @@ async function runRelayLoop(generation) {
 
 function restartRelay() {
   relayGeneration += 1;
+  void qwenTab().catch(() => {});
   void runRelayLoop(relayGeneration);
 }
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tab.url && (tab.url.startsWith("https://chat.qwen.ai/") || tab.url.startsWith("https://chat.qwenlm.ai/"))) {
+    void installQwenRequestCapture(tabId).catch(() => {});
+  }
+});
 
 chrome.runtime.onInstalled.addListener(restartRelay);
 chrome.runtime.onStartup.addListener(restartRelay);

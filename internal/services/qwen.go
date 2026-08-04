@@ -201,6 +201,7 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 	}
 
 	messageFID := qwenID()
+	requestID := qwenID()
 	now := time.Now()
 	profile := currentQwenWebModelProfile(upstreamModel)
 	var parentParam interface{}
@@ -227,6 +228,7 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 		"childrenIds":    []interface{}{},
 		"role":           "user",
 		"content":        prompt,
+		"files":          []interface{}{},
 		"user_action":    "chat",
 		"timestamp":      now.Unix(),
 		"models":         []string{upstreamModel},
@@ -250,12 +252,13 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 		"parent_id":          parentParam,
 		"messages":           []interface{}{message},
 		"timestamp":          now.Unix(),
+		"headers":            map[string]string{"X-Request-Id": requestID},
 	}
 	if profile.SupportsUsage {
 		payload["stream_options"] = map[string]bool{"include_usage": true}
 	}
 
-	response, err := qwenRequest(session, http.MethodPost, "/api/chat/completions?chat_id="+state.ChatID, payload)
+	response, err := qwenRequestWithID(session, http.MethodPost, "/api/chat/completions?chat_id="+state.ChatID, payload, requestID)
 	if err != nil {
 		return models.DeepSeekChatResult{}, state, err
 	}
@@ -341,6 +344,10 @@ func updateQwenChat(session StoredWebSession, state WebChatState) error {
 }
 
 func qwenRequest(session StoredWebSession, method, path string, payload interface{}) (*http.Response, error) {
+	return qwenRequestWithID(session, method, path, payload, qwenID())
+}
+
+func qwenRequestWithID(session StoredWebSession, method, path string, payload interface{}, requestID string) (*http.Response, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -356,7 +363,7 @@ func qwenRequest(session StoredWebSession, method, path string, payload interfac
 	for key, value := range qwenHeaders(session) {
 		request.Header.Set(key, value)
 	}
-	request.Header.Set("X-Request-Id", qwenID())
+	request.Header.Set("X-Request-Id", requestID)
 	return GlobalHTTPClient.Do(request)
 }
 
@@ -382,7 +389,7 @@ func qwenHeaders(session StoredWebSession) map[string]string {
 		"User-Agent":   userAgent,
 		"Version":      currentQwenWebFrontendVersion(),
 		"source":       "web",
-		"Timezone":     qwenEnvOrDefault("QWEN_WEB_TIMEZONE", time.Now().Format("Mon Jan 02 2006 15:04:05 GMT-0700")),
+		"Timezone":     qwenTimezoneHeader(session),
 	}
 	if token := strings.TrimSpace(WebSessionToken(session)); token != "" &&
 		envBoolDefault("QWEN_WEB_USE_AUTHORIZATION", false) {
@@ -390,9 +397,6 @@ func qwenHeaders(session StoredWebSession) map[string]string {
 	}
 	allowed := map[string]bool{
 		"accept-language": true,
-		"timezone":        true,
-		"source":          true,
-		"x-request-id":    true,
 		"x-xsrf-token":    true,
 		"x-csrf-token":    true,
 	}
@@ -402,6 +406,39 @@ func qwenHeaders(session StoredWebSession) map[string]string {
 		}
 	}
 	return headers
+}
+
+func qwenTimezoneHeader(session StoredWebSession) string {
+	raw := strings.TrimSpace(os.Getenv("QWEN_WEB_TIMEZONE"))
+	if raw == "" {
+		for key, value := range session.Headers {
+			if strings.EqualFold(strings.TrimSpace(key), "timezone") {
+				raw = strings.TrimSpace(value)
+				break
+			}
+		}
+	}
+	now := time.Now()
+	if raw != "" {
+		if location, err := time.LoadLocation(raw); err == nil {
+			return now.In(location).Format("Mon Jan 02 2006 15:04:05 GMT-0700")
+		}
+		if marker := strings.LastIndex(raw, "GMT"); marker >= 0 && len(raw) >= marker+8 {
+			offset := raw[marker+3 : marker+8]
+			if len(offset) == 5 && (offset[0] == '+' || offset[0] == '-') {
+				hours, hourErr := strconv.Atoi(offset[1:3])
+				minutes, minuteErr := strconv.Atoi(offset[3:5])
+				if hourErr == nil && minuteErr == nil && hours <= 23 && minutes <= 59 {
+					seconds := hours*3600 + minutes*60
+					if offset[0] == '-' {
+						seconds = -seconds
+					}
+					return now.In(time.FixedZone("Qwen browser", seconds)).Format("Mon Jan 02 2006 15:04:05 GMT-0700")
+				}
+			}
+		}
+	}
+	return now.Format("Mon Jan 02 2006 15:04:05 GMT-0700")
 }
 
 func parseQwenStream(reader io.Reader) (models.DeepSeekChatResult, string, error) {

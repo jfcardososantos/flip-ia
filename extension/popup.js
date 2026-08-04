@@ -236,7 +236,7 @@ async function getQwenBrowserSession() {
     target: { tabId: tab.id },
     func: () => ({
       token: localStorage.getItem("token") || localStorage.getItem("qwen_token") || "",
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      timezone: new Date().toString().replace(/\s*\(.+\)$/, ""),
       language: navigator.language || "",
       userAgent: navigator.userAgent || "",
       origin: location.origin

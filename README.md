@@ -113,9 +113,10 @@ Além dos modelos `mimo-*`, o endpoint `POST /v1/chat/completions` roteia automa
 | `groq/llama-3.1-8b-instant` | Groq | `GROQ_API_KEY` |
 | `kimi-k3` | Kimi Web (sessão do navegador) | importe a sessão Kimi pela extensão |
 | `kimi-k2.6` | Kimi Web (sessão do navegador) | importe a sessão Kimi pela extensão |
-| `qwen-web` | Qwen Web (`qwen3.7-plus`) | importe a sessão Qwen pela extensão |
+| `qwen-web` | Alias do modelo Qwen Web principal atual | importe a sessão Qwen pela extensão |
+| `qwen-web/qwen3.8-max` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
 | `qwen-web/qwen3.7-plus` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
-| `qwen-web/qwen3.8-max-preview` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
+| `qwen-web/qwen3.7-max` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
 | `openrouter/meta-llama/llama-3.1-8b-instruct:free` | OpenRouter | `OPENROUTER_API_KEY` |
 | `cf/@cf/meta/llama-3.1-8b-instruct` | Cloudflare Workers AI | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID` |
 

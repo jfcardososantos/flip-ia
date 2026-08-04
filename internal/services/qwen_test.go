@@ -82,6 +82,10 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			if payload["chat_id"] != "chat_1" || payload["model"] != "qwen3.7-plus" {
 				t.Errorf("unexpected completion payload: %+v", payload)
 			}
+			nestedHeaders, _ := payload["headers"].(map[string]interface{})
+			if nestedHeaders["X-Request-Id"] == "" || nestedHeaders["X-Request-Id"] != r.Header.Get("X-Request-Id") {
+				t.Errorf("payload and HTTP request IDs must match: payload=%+v header=%q", nestedHeaders, r.Header.Get("X-Request-Id"))
+			}
 			if payload["parent_id"] != nil {
 				t.Errorf("new chat parent_id = %#v; want null", payload["parent_id"])
 			}
@@ -90,6 +94,9 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			}
 			messages, _ := payload["messages"].([]interface{})
 			firstMessage, _ := messages[0].(map[string]interface{})
+			if files, ok := firstMessage["files"].([]interface{}); !ok || len(files) != 0 {
+				t.Errorf("Qwen user message must include an empty files array: %+v", firstMessage)
+			}
 			if firstMessage["parent_id"] != nil || firstMessage["parentId"] != nil {
 				t.Errorf("new user message parents must be null: %+v", firstMessage)
 			}
@@ -151,10 +158,20 @@ func TestQwenTransientErrorsAndProxyStatus(t *testing.T) {
 }
 
 func TestQwenHeadersAuthorizationIsExplicitOptIn(t *testing.T) {
-	session := StoredWebSession{Cookie: "session=qwen", Token: "token-1"}
+	session := StoredWebSession{
+		Cookie: "session=qwen", Token: "token-1",
+		Headers: map[string]string{"Timezone": "America/Bahia", "Version": "0.1.0"},
+	}
 	t.Setenv("QWEN_WEB_USE_AUTHORIZATION", "false")
-	if got := qwenHeaders(session)["Authorization"]; got != "" {
+	headers := qwenHeaders(session)
+	if got := headers["Authorization"]; got != "" {
 		t.Fatalf("authorization enabled by default: %q", got)
+	}
+	if got := headers["Version"]; got == "0.1.0" {
+		t.Fatalf("stored session must not override the current frontend version: %q", got)
+	}
+	if got := headers["Timezone"]; !strings.Contains(got, "GMT-0300") || strings.Contains(got, "America/Bahia") {
+		t.Fatalf("timezone header was not normalized to the browser format: %q", got)
 	}
 
 	t.Setenv("QWEN_WEB_USE_AUTHORIZATION", "true")

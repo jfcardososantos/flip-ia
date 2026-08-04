@@ -153,44 +153,44 @@ async function executeQwenJob(job) {
         }
         return false;
       };
-      const readQwenResponse = async (response) => {
-        if (!response.body || !response.body.getReader) return response.text();
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let text = "";
-        const hardDeadline = Date.now() + 60000;
-        while (true) {
-          const hasAnswer = /["']phase["']\s*:\s*["'](?:answer|slides)["']/.test(text);
-          const remaining = hardDeadline - Date.now();
-          if (remaining <= 0) {
-            await reader.cancel().catch(() => {});
-            break;
-          }
-          const idleTimeout = Math.min(hasAnswer ? 4000 : text ? 45000 : 90000, remaining);
-          const chunk = await Promise.race([
-            reader.read(),
-            sleep(idleTimeout).then(() => ({ idle: true }))
-          ]);
-          if (chunk.idle) {
-            await reader.cancel().catch(() => {});
-            break;
-          }
-          if (chunk.done) {
-            text += decoder.decode();
-            break;
-          }
-          text += decoder.decode(chunk.value, { stream: true });
-          if (hasTerminalSignal(text)) {
-            await reader.cancel().catch(() => {});
-            break;
-          }
+      const protectedQwenPaths = [
+        "/api/chat/completions", "/api/chats/new", "/api/chat/completed",
+        "/api/v1/chats", "/api/task/suggestions/completions",
+        "/api/v2/chats", "/api/v2/chat/completions",
+        "/api/v2/task/suggestions/completions", "/api/v2/files"
+      ];
+      const hasQwenUidToken = () => {
+        try {
+          const fy = window.__baxia__ && window.__baxia__.getFYModule;
+          return Boolean(fy && typeof fy.getUidToken === "function" && fy.getUidToken());
+        } catch (_error) {
+          return false;
         }
-        return text;
       };
-      for (let attempt = 0; attempt < 80; attempt += 1) {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
         const baxia = window.__baxia__;
         const fy = baxia && baxia.getFYModule;
-        if (baxia && baxia.baxiaPromptInit && fy && typeof fy.getUidToken === "function") break;
+        if (window.baxiaCommon && baxia && baxia.baxiaPromptInit && !window.baxiaInitialized && !window.baxiaNeedDelay) {
+          try {
+            window.baxiaCommon.init({
+              appendTo: "header",
+              uabOptions: { location: "sea" },
+              checkApiPath: (url) => protectedQwenPaths.some((path) => String(url || "").includes(path)),
+              showCallback: () => {},
+              hideCallback: () => {},
+              paramstype: ["uab", "umid"],
+              autoSize: true
+            });
+            window.baxiaInitialized = true;
+          } catch (_error) {
+            // The official page may be initializing the same module concurrently.
+          }
+        }
+        let uidToken = "";
+        try {
+          if (fy && typeof fy.getUidToken === "function") uidToken = fy.getUidToken() || "";
+        } catch (_error) {}
+        if (window.baxiaInitialized && uidToken) break;
         await sleep(250);
       }
       let requestBody = relayJob.body || undefined;
@@ -228,28 +228,121 @@ async function executeQwenJob(job) {
         headers: relayJob.headers || {},
         body: requestBody
       };
-      const response = await window.fetch(relayJob.url, requestOptions);
-      const responseHeaders = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
+      const observedHeaders = {};
+      const headerValue = (name) => {
+        const match = Object.keys(observedHeaders).find((key) => key.toLowerCase() === name);
+        return match ? observedHeaders[match] : "";
+      };
+      const requestDebug = (stage, error = "") => ({
+        stage,
+        error,
+        transport: "xhr",
+        baxiaReady: Boolean(window.__baxia__ && window.__baxia__.baxiaPromptInit),
+        baxiaInitialized: Boolean(window.baxiaInitialized),
+        uidTokenReady: hasQwenUidToken(),
+        bxUA: Boolean(headerValue("bx-ua")),
+        bxUmid: Boolean(headerValue("bx-umidtoken")),
+        bxVersion: Boolean(headerValue("bx-v")),
+        templateApplied,
+        templateTopLevelKeys: templateApplied ? Object.keys(JSON.parse(requestBody)).sort() : [],
+        templateMessageKeys: templateApplied ? Object.keys(JSON.parse(requestBody).messages[0] || {}).sort() : []
       });
-      const responseBody = await readQwenResponse(response);
-      return {
-        status: response.status,
-        headers: responseHeaders,
-        body: responseBody,
-        debug: {
-          baxiaReady: Boolean(window.__baxia__ && window.__baxia__.baxiaPromptInit),
-          bxUA: Boolean(requestOptions.headers && (requestOptions.headers["bx-ua"] || requestOptions.headers.get && requestOptions.headers.get("bx-ua"))),
-          bxUmid: Boolean(requestOptions.headers && (requestOptions.headers["bx-umidtoken"] || requestOptions.headers.get && requestOptions.headers.get("bx-umidtoken"))),
-          bxVersion: Boolean(requestOptions.headers && (requestOptions.headers["bx-v"] || requestOptions.headers.get && requestOptions.headers.get("bx-v"))),
-          templateApplied
+      const isCompletionRequest = String(relayJob.url || "").includes("/chat/completions");
+      // Baxia caches the selected transport per exact URL. A previous fetch for
+      // the same endpoint makes its XHR hook intentionally skip signing it.
+      // Relay jobs use XHR, so discard only this endpoint's transport decision.
+      if (window.__baxia__ && window.__baxia__.handleEffectUrl) {
+        delete window.__baxia__.handleEffectUrl[String(relayJob.url || "") + "fetch"];
+        delete window.__baxia__.handleEffectUrl[String(relayJob.url || "") + "xhr"];
+      }
+      const xhrResult = await new Promise((resolve) => {
+        const xhr = new XMLHttpRequest();
+        let settled = false;
+        let lastProgressAt = Date.now();
+        const startedAt = Date.now();
+        let interval;
+        let deadline;
+        const parseHeaders = () => {
+          const headers = {};
+          try {
+            for (const line of String(xhr.getAllResponseHeaders() || "").trim().split(/\r?\n/)) {
+              const separator = line.indexOf(":");
+              if (separator > 0) headers[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
+            }
+          } catch (_error) {
+            // Headers may be unavailable before the response starts.
+          }
+          return headers;
+        };
+        const finish = (forcedStatus = 0, error = "") => {
+          if (settled) return;
+          settled = true;
+          clearInterval(interval);
+          clearTimeout(deadline);
+          let body = "";
+          try { body = String(xhr.responseText || ""); } catch (_error) {}
+          const result = {
+            status: forcedStatus || xhr.status || 598,
+            headers: parseHeaders(),
+            body,
+            error
+          };
+          resolve(result);
+          if (xhr.readyState !== XMLHttpRequest.DONE) xhr.abort();
+        };
+        try {
+          xhr.open(requestOptions.method, relayJob.url, true);
+          xhr.withCredentials = true;
+          const pageSetRequestHeader = xhr.setRequestHeader.bind(xhr);
+          xhr.setRequestHeader = (key, value) => {
+            observedHeaders[key] = value;
+            return pageSetRequestHeader(key, value);
+          };
+          for (const [key, value] of Object.entries(requestOptions.headers || {})) {
+            xhr.setRequestHeader(key, value);
+          }
+          xhr.onprogress = () => {
+            lastProgressAt = Date.now();
+            if (isCompletionRequest) {
+              let text = "";
+              try { text = String(xhr.responseText || ""); } catch (_error) {}
+              if (hasTerminalSignal(text)) finish();
+            }
+          };
+          xhr.onload = () => finish();
+          xhr.onerror = () => finish(598, "Qwen XHR network error");
+          xhr.onabort = () => finish(598, "Qwen XHR aborted");
+          interval = setInterval(() => {
+            if (!isCompletionRequest || settled) return;
+            let text = "";
+            try { text = String(xhr.responseText || ""); } catch (_error) {}
+            const hasAnswer = /["']phase["']\s*:\s*["'](?:answer|slides)["']/.test(text);
+            const idleLimit = hasAnswer ? 4000 : text ? 45000 : 55000;
+            if (text && Date.now() - lastProgressAt >= idleLimit) finish();
+            if (Date.now() - startedAt >= 65000) finish(text ? 0 : 598, text ? "" : "Qwen did not start an XHR response within 65s");
+          }, 500);
+          deadline = setTimeout(() => {
+            finish(598, `Qwen did not complete the XHR request within ${isCompletionRequest ? 65 : 30}s`);
+          }, isCompletionRequest ? 65000 : 30000);
+          xhr.send(requestBody);
+        } catch (error) {
+          finish(598, error && error.message ? error.message : String(error));
         }
+      });
+      return {
+        status: xhrResult.status,
+        headers: xhrResult.headers,
+        body: xhrResult.body,
+        debug: requestDebug(xhrResult.status === 598 ? "xhr" : "response", xhrResult.error)
       };
     }
   });
   if (!execution) throw new Error("A aba do Qwen não retornou o resultado da chamada.");
   if (execution.error) throw new Error(execution.error.message || String(execution.error));
+  if (execution.result && String(execution.result.body || "").includes("aliyun_waf_")) {
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
   return execution.result;
 }
 

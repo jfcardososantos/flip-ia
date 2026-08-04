@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "flip-ai Session Importer",
-  "version": "1.3.0",
+  "version": "1.3.4",
   "description": "Captura sessões autenticadas suportadas e envia ao flip-ai.",
   "permissions": [
     "cookies",

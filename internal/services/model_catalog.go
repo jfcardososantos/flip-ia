@@ -328,10 +328,9 @@ func fallbackModelCatalog() ModelCatalogSnapshot {
 		{ID: "cf/@cf/meta/llama-3.1-8b-instruct", Provider: "cloudflare", OwnedBy: "cloudflare", Description: "Cloudflare Workers AI model"},
 		{ID: "cf/@cf/openai/gpt-oss-120b", Provider: "cloudflare", OwnedBy: "cloudflare", Description: "Cloudflare Workers AI model"},
 		{ID: "qwen-web", Provider: "qwen", OwnedBy: "qwen", Description: "Alias for the current Qwen Web default model", ContextLength: 1000000},
+		{ID: "qwen-web/qwen3.8-max", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
 		{ID: "qwen-web/qwen3.7-plus", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
-		{ID: "qwen-web/qwen3.8-max-preview", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
 		{ID: "qwen-web/qwen3.7-max", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
-		{ID: "qwen-web/qwen3.6-plus", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
 		{ID: "deepseek-v4-flash", Provider: "deepseek", OwnedBy: "deepseek", Description: "DeepSeek official model via Web Instant mode", ContextLength: 1000000},
 		{ID: "deepseek-v4-pro", Provider: "deepseek", OwnedBy: "deepseek", Description: "DeepSeek official model via Web Expert mode", ContextLength: 1000000},
 	}
@@ -340,7 +339,7 @@ func fallbackModelCatalog() ModelCatalogSnapshot {
 		providers[provider] = ModelProviderStatus{Count: countCatalogProvider(models, provider), Source: "fallback"}
 	}
 	qwenStatus := providers["qwen"]
-	qwenStatus.DefaultModel = "qwen3.7-plus"
+	qwenStatus.DefaultModel = "qwen3.8-max"
 	providers["qwen"] = qwenStatus
 	return normalizeCatalog(ModelCatalogSnapshot{Models: models, Providers: providers})
 }
@@ -405,7 +404,8 @@ func firstDeepSeekDefault(models []CatalogModel) string {
 }
 
 func discoverQwenModels(ctx context.Context) catalogDiscoveryResult {
-	endpoint := qwenEnvOrDefault("QWEN_MODELS_URL", "https://chat.qwen.ai/api/v2/models/")
+	const officialEndpoint = "https://chat.qwen.ai/api/v2/models/"
+	endpoint := qwenEnvOrDefault("QWEN_MODELS_URL", officialEndpoint)
 	var envelope struct {
 		Data struct {
 			Data []struct {
@@ -419,6 +419,12 @@ func discoverQwenModels(ctx context.Context) catalogDiscoveryResult {
 						ShortDescription string   `json:"short_description"`
 						MaxContextLength int      `json:"max_context_length"`
 						ChatType         []string `json:"chat_type"`
+						AutoThinking     bool     `json:"auto_thinking"`
+						AutoSearch       bool     `json:"auto_search"`
+						ThinkingFormat   string   `json:"thinking_format"`
+						Capabilities     struct {
+							Usage bool `json:"usage"`
+						} `json:"capabilities"`
 					} `json:"meta"`
 				} `json:"info"`
 			} `json:"data"`
@@ -432,6 +438,7 @@ func discoverQwenModels(ctx context.Context) catalogDiscoveryResult {
 		Description: "Alias for the current Qwen Web default model", ContextLength: 1000000, Dynamic: true,
 	}}
 	defaultModel := ""
+	profiles := make(map[string]qwenWebModelProfile)
 	for _, item := range envelope.Data.Data {
 		if item.ID == "" || !item.Info.IsActive || !containsString(item.Info.Meta.ChatType, "t2t") {
 			continue
@@ -439,14 +446,40 @@ func discoverQwenModels(ctx context.Context) catalogDiscoveryResult {
 		if defaultModel == "" {
 			defaultModel = item.ID
 		}
+		profiles[item.ID] = qwenWebModelProfile{
+			AutoThinking: item.Info.Meta.AutoThinking, AutoSearch: item.Info.Meta.AutoSearch,
+			ThinkingFormat: item.Info.Meta.ThinkingFormat, SupportsUsage: item.Info.Meta.Capabilities.Usage,
+		}
 		description := firstNonEmpty(item.Info.Meta.ShortDescription, item.Info.Meta.Description, item.Name)
 		models = append(models, CatalogModel{
 			ID: "qwen-web/" + item.ID, Provider: "qwen", OwnedBy: firstNonEmpty(item.OwnedBy, "qwen"),
 			Description: description, ContextLength: item.Info.Meta.MaxContextLength, Dynamic: true,
 		})
 	}
+	setQwenWebModelProfiles(profiles)
+	discoverQwenFrontendVersion(ctx, endpoint == officialEndpoint)
 	return catalogDiscoveryResult{
 		provider: "qwen", source: endpoint, defaultModel: defaultModel, models: models, attempted: true,
+	}
+}
+
+var qwenFrontendVersionRegex = regexp.MustCompile(`qwen-chat-fe/([0-9]+\.[0-9]+\.[0-9]+)/`)
+
+func discoverQwenFrontendVersion(ctx context.Context, officialModelsEndpoint bool) {
+	homeURL := strings.TrimSpace(os.Getenv("QWEN_WEB_HOME_URL"))
+	if homeURL == "" {
+		if !officialModelsEndpoint {
+			return
+		}
+		homeURL = "https://chat.qwen.ai/"
+	}
+	body, _, err := catalogGETBody(ctx, homeURL, map[string]string{"Accept": "text/html,application/xhtml+xml"})
+	if err != nil {
+		return
+	}
+	match := qwenFrontendVersionRegex.FindSubmatch(body)
+	if len(match) == 2 {
+		setQwenWebFrontendVersion(string(match[1]))
 	}
 }
 

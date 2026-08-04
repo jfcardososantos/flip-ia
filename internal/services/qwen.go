@@ -14,12 +14,69 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"flip-ai/internal/models"
 )
 
 var qwenWebBaseURL = "https://chat.qwen.ai"
+
+type qwenWebModelProfile struct {
+	AutoThinking   bool
+	AutoSearch     bool
+	ThinkingFormat string
+	SupportsUsage  bool
+}
+
+var qwenWebRuntime = struct {
+	sync.RWMutex
+	frontendVersion string
+	modelProfiles   map[string]qwenWebModelProfile
+}{
+	frontendVersion: "0.2.81",
+	modelProfiles:   make(map[string]qwenWebModelProfile),
+}
+
+func setQwenWebFrontendVersion(version string) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return
+	}
+	qwenWebRuntime.Lock()
+	qwenWebRuntime.frontendVersion = version
+	qwenWebRuntime.Unlock()
+}
+
+func currentQwenWebFrontendVersion() string {
+	if configured := strings.TrimSpace(os.Getenv("QWEN_WEB_VERSION")); configured != "" {
+		return configured
+	}
+	qwenWebRuntime.RLock()
+	version := qwenWebRuntime.frontendVersion
+	qwenWebRuntime.RUnlock()
+	if version == "" {
+		return "0.2.81"
+	}
+	return version
+}
+
+func setQwenWebModelProfiles(profiles map[string]qwenWebModelProfile) {
+	copyProfiles := make(map[string]qwenWebModelProfile, len(profiles))
+	for model, profile := range profiles {
+		copyProfiles[strings.ToLower(strings.TrimSpace(model))] = profile
+	}
+	qwenWebRuntime.Lock()
+	qwenWebRuntime.modelProfiles = copyProfiles
+	qwenWebRuntime.Unlock()
+}
+
+func currentQwenWebModelProfile(model string) qwenWebModelProfile {
+	qwenWebRuntime.RLock()
+	profile := qwenWebRuntime.modelProfiles[strings.ToLower(strings.TrimSpace(model))]
+	qwenWebRuntime.RUnlock()
+	return profile
+}
 
 type QwenWebError struct {
 	StatusCode int
@@ -44,7 +101,7 @@ func ResolveQwenWebModel(model string) (string, bool) {
 		if current := strings.TrimSpace(CurrentModelCatalog().Providers["qwen"].DefaultModel); current != "" {
 			return current, true
 		}
-		return "qwen3.7-plus", true
+		return "qwen3.8-max", true
 	}
 	if strings.HasPrefix(model, "qwen-web/") {
 		upstream := strings.TrimSpace(strings.TrimPrefix(model, "qwen-web/"))
@@ -93,6 +150,43 @@ func IsQwenContextError(err error) bool {
 		strings.Contains(body, "parent") && strings.Contains(body, "invalid")
 }
 
+func IsQwenTransientError(err error) bool {
+	var webErr *QwenWebError
+	if errors.As(err, &webErr) {
+		return webErr.StatusCode == http.StatusRequestTimeout ||
+			webErr.StatusCode == http.StatusConflict ||
+			webErr.StatusCode == http.StatusTooEarly ||
+			webErr.StatusCode == http.StatusTooManyRequests ||
+			webErr.StatusCode >= http.StatusInternalServerError
+	}
+	body := strings.ToLower(err.Error())
+	return strings.Contains(body, "empty stream") ||
+		strings.Contains(body, "stream error") ||
+		strings.Contains(body, "timeout") ||
+		strings.Contains(body, "connection reset") ||
+		strings.Contains(body, "unexpected eof")
+}
+
+func IsQwenAuthError(err error) bool {
+	var webErr *QwenWebError
+	if errors.As(err, &webErr) && (webErr.StatusCode == http.StatusUnauthorized || webErr.StatusCode == http.StatusForbidden) {
+		return true
+	}
+	body := strings.ToLower(err.Error())
+	return strings.Contains(body, "verification") || strings.Contains(body, "captcha") || strings.Contains(body, "login")
+}
+
+func QwenProxyStatus(err error) int {
+	var webErr *QwenWebError
+	if errors.As(err, &webErr) && webErr.StatusCode == http.StatusTooManyRequests {
+		return http.StatusTooManyRequests
+	}
+	if IsQwenTransientError(err) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadGateway
+}
+
 func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatState, prompt, title string, thinking, search bool) (models.DeepSeekChatResult, WebChatState, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return models.DeepSeekChatResult{}, state, errors.New("Qwen requires a non-empty prompt")
@@ -108,33 +202,41 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 
 	messageFID := qwenID()
 	now := time.Now()
+	profile := currentQwenWebModelProfile(upstreamModel)
 	var parentParam interface{}
 	if strings.TrimSpace(state.ParentMessageID) != "" {
 		parentParam = state.ParentMessageID
 	}
-	message := map[string]interface{}{
-		"id":            nil,
-		"fid":           messageFID,
-		"parentId":      parentParam,
-		"parent_id":     parentParam,
-		"childrenIds":   []interface{}{},
-		"role":          "user",
-		"content":       prompt,
-		"user_action":   "chat",
-		"timestamp":     now.Unix(),
-		"models":        []string{upstreamModel},
-		"model":         "",
-		"chat_type":     "t2t",
-		"sub_chat_type": "t2t",
-		"feature_config": map[string]interface{}{
-			"thinking_enabled": thinking,
-			"output_schema":    "phase",
-			"research_mode":    "normal",
-			"auto_search":      search,
-		},
+	featureConfig := map[string]interface{}{
+		"thinking_enabled": thinking,
+		"output_schema":    "phase",
+		"research_mode":    "normal",
+		"auto_thinking":    false,
+		"thinking_mode":    "Fast",
+		"auto_search":      profile.AutoSearch || search,
 	}
 	if thinking {
-		message["feature_config"].(map[string]interface{})["thinking_format"] = "summary"
+		featureConfig["thinking_mode"] = "Thinking"
+		featureConfig["thinking_format"] = firstNonEmpty(profile.ThinkingFormat, "summary")
+	}
+	message := map[string]interface{}{
+		"id":             nil,
+		"fid":            messageFID,
+		"parentId":       parentParam,
+		"parent_id":      parentParam,
+		"childrenIds":    []interface{}{},
+		"role":           "user",
+		"content":        prompt,
+		"user_action":    "chat",
+		"timestamp":      now.Unix(),
+		"models":         []string{upstreamModel},
+		"model":          "",
+		"chat_type":      "t2t",
+		"sub_chat_type":  "t2t",
+		"feature_config": featureConfig,
+		"extra": map[string]interface{}{
+			"meta": map[string]interface{}{"subChatType": "t2t"},
+		},
 	}
 	payload := map[string]interface{}{
 		"stream":             true,
@@ -148,7 +250,9 @@ func QwenWebChat(session StoredWebSession, upstreamModel string, state WebChatSt
 		"parent_id":          parentParam,
 		"messages":           []interface{}{message},
 		"timestamp":          now.Unix(),
-		"stream_options":     map[string]bool{"include_usage": true},
+	}
+	if profile.SupportsUsage {
+		payload["stream_options"] = map[string]bool{"include_usage": true}
 	}
 
 	response, err := qwenRequest(session, http.MethodPost, "/api/chat/completions?chat_id="+state.ChatID, payload)
@@ -276,9 +380,9 @@ func qwenHeaders(session StoredWebSession) map[string]string {
 		"Origin":       origin,
 		"Referer":      referer,
 		"User-Agent":   userAgent,
-		"Version":      qwenEnvOrDefault("QWEN_WEB_VERSION", "0.2.80"),
+		"Version":      currentQwenWebFrontendVersion(),
 		"source":       "web",
-		"Timezone":     qwenEnvOrDefault("QWEN_WEB_TIMEZONE", "America/Bahia"),
+		"Timezone":     qwenEnvOrDefault("QWEN_WEB_TIMEZONE", time.Now().Format("Mon Jan 02 2006 15:04:05 GMT-0700")),
 	}
 	if token := strings.TrimSpace(WebSessionToken(session)); token != "" &&
 		envBoolDefault("QWEN_WEB_USE_AUTHORIZATION", false) {
@@ -287,7 +391,6 @@ func qwenHeaders(session StoredWebSession) map[string]string {
 	allowed := map[string]bool{
 		"accept-language": true,
 		"timezone":        true,
-		"version":         true,
 		"source":          true,
 		"x-request-id":    true,
 		"x-xsrf-token":    true,

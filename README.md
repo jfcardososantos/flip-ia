@@ -329,17 +329,17 @@ Os adapters web implementados são `deepseek`, `kimi` e `qwen`. No Qwen, o proxy
 Variáveis opcionais do Qwen:
 
 ```env
-QWEN_WEB_DEFAULT_MODEL=qwen3.7-plus
+QWEN_WEB_DEFAULT_MODEL=qwen3.8-max
 QWEN_WEB_ROLLOVER_TOKENS=850000
 QWEN_WEB_HANDOFF_CHARS=120000
 QWEN_WEB_THINKING=true
-QWEN_WEB_TIMEZONE=America/Bahia
-QWEN_WEB_VERSION=0.2.80
+QWEN_WEB_TIMEZONE=Mon Aug 03 2026 10:00:00 GMT-0300
+QWEN_WEB_VERSION=0.2.81
 QWEN_WEB_USE_AUTHORIZATION=false
 ```
 
 Como esse adapter usa a sessão web, mudanças do site ou verificações anti-bot podem exigir abrir o Qwen no Chrome e importar a sessão novamente.
-No modo web, a Qwen autentica pelas cookies da sessão e o proxy não envia `Authorization` por padrão. Ative `QWEN_WEB_USE_AUTHORIZATION=true` somente se estiver reproduzindo um cliente desktop que realmente envie esse header.
+No modo web, a Qwen autentica pelas cookies da sessão e o proxy não envia `Authorization` por padrão. Ative `QWEN_WEB_USE_AUTHORIZATION=true` somente se estiver reproduzindo um cliente desktop que realmente envie esse header. Sem `QWEN_WEB_DEFAULT_MODEL` e `QWEN_WEB_VERSION`, o proxy acompanha automaticamente o modelo principal ativo e a versão do frontend publicados pelo site oficial.
 
 Para garantir que várias chamadas continuem exatamente no mesmo chat Qwen, envie um valor estável em `user`:
 

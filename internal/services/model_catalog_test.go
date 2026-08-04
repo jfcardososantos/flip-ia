@@ -77,7 +77,10 @@ func TestDiscoverQwenModelsUsesCurrentActiveTextModels(t *testing.T) {
 							"meta": {
 								"short_description": "Current recommended model",
 								"max_context_length": 1000000,
-								"chat_type": ["t2t"]
+								"chat_type": ["t2t"],
+								"auto_thinking": true,
+								"auto_search": true,
+								"thinking_format": "summary"
 							}
 						}
 					},
@@ -117,6 +120,10 @@ func TestDiscoverQwenModelsUsesCurrentActiveTextModels(t *testing.T) {
 	}
 	if result.models[1].ContextLength != 1000000 {
 		t.Fatalf("context length = %d; want 1000000", result.models[1].ContextLength)
+	}
+	profile := currentQwenWebModelProfile("qwen-future")
+	if !profile.AutoThinking || !profile.AutoSearch || profile.ThinkingFormat != "summary" || profile.SupportsUsage {
+		t.Fatalf("unexpected discovered Qwen profile: %+v", profile)
 	}
 }
 

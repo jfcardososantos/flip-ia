@@ -854,7 +854,7 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 	}
 	search := input.WebSearch || strings.Contains(strings.ToLower(targetModel), "search")
 	result, updatedState, err := services.QwenWebChat(session, upstreamModel, state, prompt, state.Title, thinking, search)
-	if err != nil && services.IsQwenContextError(err) {
+	if err != nil && (services.IsQwenContextError(err) || services.IsQwenTransientError(err)) {
 		state.ChatID = ""
 		state.ParentMessageID = ""
 		state.EstimatedTokens = 0
@@ -866,7 +866,15 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 		result, updatedState, err = services.QwenWebChat(session, upstreamModel, state, prompt, state.Title, thinking, search)
 	}
 	if err != nil {
-		utils.SendError(c, upstreamFailureStatus, "Failed to call Qwen Web: "+err.Error()+". If Qwen requested verification, open chat.qwen.ai in Chrome and import the session again.", "server_error", nil)
+		status := services.QwenProxyStatus(err)
+		message := "Failed to call Qwen Web: " + err.Error()
+		if services.IsQwenAuthError(err) {
+			message += ". Qwen requested authentication or verification; open chat.qwen.ai in Chrome and import the session again"
+		}
+		if status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests {
+			c.Header("Retry-After", "2")
+		}
+		utils.SendError(c, status, message, "server_error", nil)
 		return
 	}
 

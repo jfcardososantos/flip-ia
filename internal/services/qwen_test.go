@@ -11,10 +11,10 @@ import (
 func TestResolveQwenWebModel(t *testing.T) {
 	t.Setenv("QWEN_WEB_DEFAULT_MODEL", "")
 	tests := map[string]string{
-		"qwen-web":                     "qwen3.7-plus",
-		"qwen-web/qwen3.7-plus":        "qwen3.7-plus",
-		"qwen-web/qwen3.8-max-preview": "qwen3.8-max-preview",
-		"qwen-web/qwen-future":         "qwen-future",
+		"qwen-web":              "qwen3.8-max",
+		"qwen-web/qwen3.7-plus": "qwen3.7-plus",
+		"qwen-web/qwen3.8-max":  "qwen3.8-max",
+		"qwen-web/qwen-future":  "qwen-future",
 	}
 	for input, want := range tests {
 		got, ok := ResolveQwenWebModel(input)
@@ -85,10 +85,22 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 			if payload["parent_id"] != nil {
 				t.Errorf("new chat parent_id = %#v; want null", payload["parent_id"])
 			}
+			if _, exists := payload["stream_options"]; exists {
+				t.Errorf("stream_options must be omitted unless the model advertises usage support: %+v", payload)
+			}
 			messages, _ := payload["messages"].([]interface{})
 			firstMessage, _ := messages[0].(map[string]interface{})
 			if firstMessage["parent_id"] != nil || firstMessage["parentId"] != nil {
 				t.Errorf("new user message parents must be null: %+v", firstMessage)
+			}
+			featureConfig, _ := firstMessage["feature_config"].(map[string]interface{})
+			if featureConfig["auto_thinking"] != false || featureConfig["thinking_mode"] != "Fast" {
+				t.Errorf("unexpected modern feature config: %+v", featureConfig)
+			}
+			extra, _ := firstMessage["extra"].(map[string]interface{})
+			meta, _ := extra["meta"].(map[string]interface{})
+			if meta["subChatType"] != "t2t" {
+				t.Errorf("missing Qwen message metadata: %+v", firstMessage)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte("data: {\"response.created\":{\"chat_id\":\"chat_1\",\"parent_id\":\"user_1\",\"response_id\":\"assistant_1\"}}\n\n"))
@@ -125,6 +137,16 @@ func TestQwenWebChatCreatesVisibleConversationAndContinuesByResponseID(t *testin
 	}
 	if !createCalled || !completionCalled || !updateCalled {
 		t.Fatalf("missing upstream calls: create=%v completion=%v update=%v", createCalled, completionCalled, updateCalled)
+	}
+}
+
+func TestQwenTransientErrorsAndProxyStatus(t *testing.T) {
+	err := &QwenWebError{StatusCode: http.StatusInternalServerError, Body: `{"detail":"Internal server error"}`}
+	if !IsQwenTransientError(err) || QwenProxyStatus(err) != http.StatusServiceUnavailable {
+		t.Fatalf("Qwen 500 must be retryable and exposed as 503")
+	}
+	if IsQwenAuthError(err) {
+		t.Fatal("generic Qwen 500 must not be reported as a verification failure")
 	}
 }
 

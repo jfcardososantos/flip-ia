@@ -1033,6 +1033,9 @@ func shouldRetryQwenAgentToolCall(result parsedMimoChat, toolChoice string, mess
 	if qwenTaskRequiresWorkspaceChange(messages) && qwenLooksLikeCompletion(result.CleanText) && !qwenHasWorkspaceMutation(messages) {
 		return true
 	}
+	if qwenTaskRequiresValidation(messages) && qwenLooksLikeCompletion(result.CleanText) && !qwenHasValidationCommand(messages) {
+		return true
+	}
 	return qwenLatestTurnRequiresExecution(messages)
 }
 
@@ -1071,14 +1074,63 @@ func qwenLooksLikeCompletion(text string) bool {
 	return false
 }
 
-func qwenHasWorkspaceMutation(messages []models.Message) bool {
-	start := 0
+func qwenTaskRequiresValidation(messages []models.Message) bool {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
-			start = i + 1
-			break
+		if !strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(services.ExtractText(messages[i].Content, false)))
+		for _, marker := range []string{
+			"rode os testes", "rodar os testes", "execute os testes", "run the tests", "run tests",
+			"valide", "validate ", "verifique o build", "check the build", "rode o build", "run the build",
+			"rode o lint", "run lint", "typecheck", "type-check",
+		} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func qwenHasValidationCommand(messages []models.Message) bool {
+	start := qwenLatestUserMessageEnd(messages)
+	for _, message := range messages[start:] {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "assistant") {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			name := strings.ToLower(strings.TrimSpace(call.Function.Name))
+			if !strings.Contains(name, "terminal") && !strings.Contains(name, "command") && !strings.Contains(name, "shell") && !strings.Contains(name, "code") && !strings.Contains(name, "test") {
+				continue
+			}
+			arguments := strings.ToLower(call.Function.Arguments)
+			for _, marker := range []string{
+				"go test", "cargo test", "pytest", "npm test", "npm run test", "pnpm test", "yarn test",
+				"npm run build", "pnpm build", "yarn build", "go build", "cargo build", "npm run lint",
+				"pnpm lint", "yarn lint", "typecheck", "type-check", "tsc --noemit", "git diff --check",
+			} {
+				if strings.Contains(arguments, marker) {
+					return true
+				}
+			}
 		}
 	}
+	return false
+}
+
+func qwenLatestUserMessageEnd(messages []models.Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func qwenHasWorkspaceMutation(messages []models.Message) bool {
+	start := qwenLatestUserMessageEnd(messages)
 	for _, message := range messages[start:] {
 		if strings.ToLower(strings.TrimSpace(message.Role)) != "assistant" {
 			continue
@@ -1154,6 +1206,9 @@ func buildQwenAgentToolRetryPrompt(result parsedMimoChat, messages []models.Mess
 	sb.WriteString(". Treat host tools and configured credentials as real. Only give a final answer after tool results prove completion.\n")
 	if qwenTaskRequiresWorkspaceChange(messages) && !qwenHasWorkspaceMutation(messages) {
 		sb.WriteString("So far the host transcript contains no write/edit action. Reading files, listing paths, or running checks does not implement the requested change. Use an appropriate editing or command tool now.\n")
+	}
+	if qwenTaskRequiresValidation(messages) && !qwenHasValidationCommand(messages) {
+		sb.WriteString("The user requested validation, but the host transcript contains no test/build/lint command yet. Run the relevant validation tool before declaring completion.\n")
 	}
 	if previous != "" {
 		sb.WriteString("Previous non-executed response:\n")

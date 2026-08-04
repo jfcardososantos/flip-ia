@@ -67,10 +67,24 @@ func TestQwenFinalAnswerAfterToolResultDoesNotForceAnotherTool(t *testing.T) {
 	messages := []models.Message{
 		{Role: "user", Content: "Corrija no projeto e rode os testes."},
 		{Role: "assistant", ToolCalls: []models.ToolCall{{Function: models.ToolFunction{Name: "apply_patch", Arguments: `{"patch":"change"}`}}}},
+		{Role: "tool", Content: "Done"},
+		{Role: "assistant", ToolCalls: []models.ToolCall{{Function: models.ToolFunction{Name: "terminal", Arguments: `{"command":"go test ./..."}`}}}},
 		{Role: "tool", Content: "PASS"},
 	}
 	if shouldRetryQwenAgentToolCall(result, "auto", messages) {
 		t.Fatal("a final answer following a tool result must be allowed")
+	}
+}
+
+func TestQwenEditWithoutRequestedValidationCannotFinish(t *testing.T) {
+	result := parsedMimoChat{CleanText: "Concluído; a alteração foi aplicada.", FinishReason: "stop"}
+	messages := []models.Message{
+		{Role: "user", Content: "Corrija no projeto e rode os testes."},
+		{Role: "assistant", ToolCalls: []models.ToolCall{{Function: models.ToolFunction{Name: "apply_patch", Arguments: `{"patch":"change"}`}}}},
+		{Role: "tool", Content: "Done"},
+	}
+	if !shouldRetryQwenAgentToolCall(result, "auto", messages) {
+		t.Fatal("requested validation must run before Qwen can finish")
 	}
 }
 

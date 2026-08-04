@@ -131,6 +131,62 @@ async function executeQwenJob(job) {
     args: [job],
     func: async (relayJob) => {
       const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const hasTerminalSignal = (text) => {
+        if (text.includes("data: [DONE]")) return true;
+        const inspect = (value) => {
+          if (!value || typeof value !== "object") return false;
+          if (value.done === true || value.finished === true || value.is_finished === true) return true;
+          if (typeof value.finish_reason === "string" && value.finish_reason) return true;
+          if (value["response.completed"] || value["response.finished"] || value["message.finished"]) return true;
+          return Object.values(value).some(inspect);
+        };
+        const frames = text.split(/\r?\n\r?\n/);
+        for (const frame of frames) {
+          const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim()).join("\n");
+          if (!data || data === "[DONE]") continue;
+          try {
+            if (inspect(JSON.parse(data))) return true;
+          } catch (_error) {
+            // Wait for a complete SSE frame.
+          }
+        }
+        return false;
+      };
+      const readQwenResponse = async (response) => {
+        if (!response.body || !response.body.getReader) return response.text();
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let text = "";
+        const hardDeadline = Date.now() + 60000;
+        while (true) {
+          const hasAnswer = /["']phase["']\s*:\s*["'](?:answer|slides)["']/.test(text);
+          const remaining = hardDeadline - Date.now();
+          if (remaining <= 0) {
+            await reader.cancel().catch(() => {});
+            break;
+          }
+          const idleTimeout = Math.min(hasAnswer ? 4000 : text ? 45000 : 90000, remaining);
+          const chunk = await Promise.race([
+            reader.read(),
+            sleep(idleTimeout).then(() => ({ idle: true }))
+          ]);
+          if (chunk.idle) {
+            await reader.cancel().catch(() => {});
+            break;
+          }
+          if (chunk.done) {
+            text += decoder.decode();
+            break;
+          }
+          text += decoder.decode(chunk.value, { stream: true });
+          if (hasTerminalSignal(text)) {
+            await reader.cancel().catch(() => {});
+            break;
+          }
+        }
+        return text;
+      };
       for (let attempt = 0; attempt < 80; attempt += 1) {
         const baxia = window.__baxia__;
         const fy = baxia && baxia.getFYModule;
@@ -177,10 +233,11 @@ async function executeQwenJob(job) {
       response.headers.forEach((value, key) => {
         responseHeaders[key] = value;
       });
+      const responseBody = await readQwenResponse(response);
       return {
         status: response.status,
         headers: responseHeaders,
-        body: await response.text(),
+        body: responseBody,
         debug: {
           baxiaReady: Boolean(window.__baxia__ && window.__baxia__.baxiaPromptInit),
           bxUA: Boolean(requestOptions.headers && (requestOptions.headers["bx-ua"] || requestOptions.headers.get && requestOptions.headers.get("bx-ua"))),
@@ -233,6 +290,7 @@ async function handleRelayJob(config, job) {
 }
 
 async function runRelayLoop(generation) {
+  let resetSent = false;
   while (generation === relayGeneration) {
     const config = await relayConfig();
     if (!config.proxyUrl) {
@@ -240,6 +298,15 @@ async function runRelayLoop(generation) {
       continue;
     }
     try {
+      if (!resetSent) {
+        const resetResponse = await fetch(`${config.proxyUrl}/auth/qwen/relay/reset`, {
+          method: "POST",
+          headers: adminHeaders(config.apiKey, true),
+          body: "{}"
+        });
+        if (!resetResponse.ok) throw new Error(`Falha ao reiniciar a ponte Qwen: HTTP ${resetResponse.status}`);
+        resetSent = true;
+      }
       const response = await fetch(`${config.proxyUrl}/auth/qwen/relay/next`, {
         method: "GET",
         headers: adminHeaders(config.apiKey),

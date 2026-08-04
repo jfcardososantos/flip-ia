@@ -1127,6 +1127,14 @@ func main() {
 		c.JSON(http.StatusOK, job)
 	})
 
+	r.POST("/auth/qwen/relay/reset", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		cancelled := services.ResetQwenBrowserRelay("browser extension reloaded")
+		c.JSON(http.StatusOK, gin.H{"reset": true, "cancelled": cancelled})
+	})
+
 	r.POST("/auth/qwen/relay/result", func(c *gin.Context) {
 		if !validateSetupAccess(c) {
 			return

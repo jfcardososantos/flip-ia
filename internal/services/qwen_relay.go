@@ -111,6 +111,28 @@ func CompleteQwenBrowserRelayJob(result QwenBrowserRelayResult) error {
 	}
 }
 
+func ResetQwenBrowserRelay(reason string) int {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "browser extension reconnected"
+	}
+	qwenBrowserRelay.Lock()
+	defer qwenBrowserRelay.Unlock()
+	cancelled := 0
+	for _, pending := range qwenBrowserRelay.pending {
+		select {
+		case pending.result <- QwenBrowserRelayResult{Error: "Qwen browser relay reset: " + reason}:
+			cancelled++
+		default:
+		}
+	}
+	for len(qwenBrowserRelay.jobs) > 0 {
+		<-qwenBrowserRelay.jobs
+	}
+	qwenBrowserRelay.lastSeen = time.Now()
+	return cancelled
+}
+
 func QwenBrowserRelayRequest(method, path string, payload interface{}, headers map[string]string) (*http.Response, error) {
 	if !QwenBrowserRelayAvailable() {
 		return nil, ErrQwenBrowserRelayUnavailable

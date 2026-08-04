@@ -167,6 +167,33 @@ func TestParseToolCallsOpenAIShape(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsQwenParametersAlias(t *testing.T) {
+	text := `{"name":"web_search","parameters":{"query":"official Go documentation"}}`
+	clean, calls := ParseToolCalls(text)
+	if clean != "" || len(calls) != 1 {
+		t.Fatalf("expected one clean tool call, clean=%q calls=%+v", clean, calls)
+	}
+	if calls[0].Function.Name != "web_search" || !strings.Contains(calls[0].Function.Arguments, `"query"`) {
+		t.Fatalf("unexpected Qwen tool call: %+v", calls[0])
+	}
+}
+
+func TestParseToolCallsAnthropicToolUseShape(t *testing.T) {
+	text := `{"type":"tool_use","name":"web_search","input":{"query":"Go docs"}}`
+	_, calls := ParseToolCalls(text)
+	if len(calls) != 1 || calls[0].Type != "function" || !strings.Contains(calls[0].Function.Arguments, "Go docs") {
+		t.Fatalf("unexpected tool_use conversion: %+v", calls)
+	}
+}
+
+func TestParseToolCallsDoubleEncodedEnvelope(t *testing.T) {
+	text := `"{\"name\":\"web_search\",\"arguments\":{\"query\":\"Go docs\"}}"`
+	clean, calls := ParseToolCalls(text)
+	if clean != "" || len(calls) != 1 || calls[0].Function.Name != "web_search" {
+		t.Fatalf("unexpected double-encoded conversion: clean=%q calls=%+v", clean, calls)
+	}
+}
+
 func TestParseToolCallsFencedOpenAIShape(t *testing.T) {
 	text := "Vou editar.\n```json\n{\"tool_call\":{\"name\":\"execute_command\",\"arguments\":{\"command\":\"go test ./...\"}}}\n```"
 	clean, calls := ParseToolCalls(text)

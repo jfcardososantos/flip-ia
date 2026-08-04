@@ -18,7 +18,7 @@ import (
 
 var (
 	trailingToolJSONRegex = regexp.MustCompile(`(?s)\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*.*\}$`)
-	fencedJSONRegex      = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
+	fencedJSONRegex       = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
 )
 
 // FormatToolsAsInstructions mirrors the simpler behavior from the first project version.
@@ -166,7 +166,8 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 
 	if len(toolCalls) == 0 {
 		trimmedText := stripMarkdownFence(strings.TrimSpace(text))
-		if strings.HasPrefix(trimmedText, "{") || strings.HasPrefix(trimmedText, "[") {
+		if strings.HasPrefix(trimmedText, "{") || strings.HasPrefix(trimmedText, "[") ||
+			strings.HasPrefix(trimmedText, `"{`) || strings.HasPrefix(trimmedText, `"[`) {
 			if parsed := parseToolCallJSON(trimmedText); len(parsed) > 0 {
 				toolCalls = append(toolCalls, parsed...)
 				cleanText = ""
@@ -522,6 +523,18 @@ func firstToolJSONIndex(s string) int {
 
 func parseToolCallValue(value interface{}) []models.ToolCall {
 	switch v := value.(type) {
+	case string:
+		// Some models double-encode the complete tool envelope as a JSON string.
+		// Decode it once instead of exposing that envelope as assistant prose.
+		trimmed := strings.TrimSpace(v)
+		if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
+			return nil
+		}
+		var nested interface{}
+		if err := json.Unmarshal([]byte(trimmed), &nested); err != nil {
+			return nil
+		}
+		return parseToolCallValue(nested)
 	case []interface{}:
 		var calls []models.ToolCall
 		for _, item := range v {
@@ -547,12 +560,25 @@ func parseToolCallValue(value interface{}) []models.ToolCall {
 func parseSingleToolCall(data map[string]interface{}) []models.ToolCall {
 	id, _ := data["id"].(string)
 	callType, _ := data["type"].(string)
-	if callType == "" {
+	// "tool_use" is the Anthropic-style envelope type, while the OpenAI
+	// compatibility response must always expose function tool calls.
+	if callType == "" || strings.EqualFold(callType, "tool_use") {
 		callType = "function"
 	}
 
 	name, _ := data["name"].(string)
+	if name == "" {
+		name, _ = data["tool"].(string)
+	}
 	args := data["arguments"]
+	if args == nil {
+		for _, alias := range []string{"parameters", "input", "args", "params"} {
+			if candidate, ok := data[alias]; ok {
+				args = candidate
+				break
+			}
+		}
+	}
 
 	if fn, ok := data["function"].(map[string]interface{}); ok {
 		if n, ok := fn["name"].(string); ok {
@@ -560,7 +586,16 @@ func parseSingleToolCall(data map[string]interface{}) []models.ToolCall {
 		}
 		if a, ok := fn["arguments"]; ok {
 			args = a
+		} else if args == nil {
+			for _, alias := range []string{"parameters", "input", "args", "params"} {
+				if candidate, ok := fn[alias]; ok {
+					args = candidate
+					break
+				}
+			}
 		}
+	} else if fn, ok := data["function"].(string); ok && name == "" {
+		name = fn
 	}
 
 	if name == "" {

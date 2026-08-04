@@ -41,6 +41,7 @@ var (
 	agentLocationOnlyRegex    = regexp.MustCompile(`(?i)^\s*(?:/[^\n]+|[A-Za-z]:\\[^\n]+|\.{0,2}/[^\n]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml)(?::|\s+)\d+(?::|\s+)\d+\s*$`)
 	agentPathLocationRegex    = regexp.MustCompile(`(?i)((?:/[^\s]+|[A-Za-z]:\\[^\s]+|\.{1,2}/[^\s]+)\.(?:tsx|ts|jsx|js|css|scss|sass|less|html|json|md|mdx|go|py|php|vue|svelte|astro|yml|yaml))(?:(?::|\s+)\d+(?::|\s+)\d+)?`)
 	clientIdentityPromptRegex = regexp.MustCompile(`(?im)^\s*(you are|you're|you act as|you will act as)\s+(an?\s+)?(hermes(?:\s+agent)?|kilo(?:\s+code)?|cline|roo(?:\s+code)?|cursor(?:\s+agent)?|ide\s+agent)\b[^\n]*`)
+	toolEnvelopeJSONRegex     = regexp.MustCompile(`(?is)\{\s*["']?(?:name|tool)["']?\s*:\s*["'][A-Za-z0-9_.:-]+["']|["']tool_calls?["']\s*:`)
 )
 
 type openAIChatInput struct {
@@ -897,10 +898,6 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 	if len(input.Messages) > 0 {
 		updatedState.LastMessageHash = services.QwenMessageHash(input.Messages[len(input.Messages)-1])
 	}
-	if err := services.SaveWebChatState(updatedState); err != nil {
-		fmt.Printf("[%s] Failed to persist Qwen web state: %v\n", completionID, err)
-	}
-
 	content, toolCalls := utils.ParseToolCalls(result.Content)
 	if agentMode {
 		toolCalls = filterAllowedToolCalls(toolCalls, input.Tools, toolChoice)
@@ -913,6 +910,17 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 		storePendingToolCalls(sessionHandle, toolCalls)
 	}
 	result.Content = content
+	if agentMode && len(toolCalls) == 0 && looksLikeMalformedToolAttempt(content) {
+		// Never stream a raw/incomplete tool envelope as assistant text. The
+		// recovery loop above already asked Qwen twice to correct it; returning a
+		// retryable upstream error is safer than making the IDE print fake JSON.
+		c.Header("Retry-After", "1")
+		utils.SendError(c, http.StatusBadGateway, "Qwen returned a malformed tool call after automatic recovery", "server_error", nil)
+		return
+	}
+	if err := services.SaveWebChatState(updatedState); err != nil {
+		fmt.Printf("[%s] Failed to persist Qwen web state: %v\n", completionID, err)
+	}
 
 	if input.Stream {
 		writeDeepSeekStreamResponse(c, completionID, targetModel, result, responseCalls)
@@ -1846,6 +1854,12 @@ func filterAllowedToolCalls(calls []models.ToolCall, tools []models.Tool, toolCh
 	for _, call := range calls {
 		name := strings.ToLower(strings.TrimSpace(call.Function.Name))
 		if !allowed[name] || (restrictToChoice && name != choice) {
+			continue
+		}
+		var arguments map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(call.Function.Arguments)), &arguments); err != nil || arguments == nil {
+			// Invalid arguments must go through model recovery instead of being
+			// forwarded to the IDE as an unexecutable tool call.
 			continue
 		}
 		filtered = append(filtered, call)
@@ -3019,6 +3033,12 @@ func looksLikeMalformedToolAttempt(text string) bool {
 	}
 	lower := strings.ToLower(text)
 	if strings.Contains(lower, "<tool_call") {
+		return true
+	}
+	if toolEnvelopeJSONRegex.MatchString(text) {
+		return true
+	}
+	if strings.HasPrefix(lower, "{") && strings.Contains(lower, `"function"`) && strings.Contains(lower, `"name"`) {
 		return true
 	}
 

@@ -155,3 +155,18 @@ func TestFilterAllowedToolCallsForQwenRejectsInventedCommand(t *testing.T) {
 		t.Fatalf("unexpected filtered calls: %+v", filtered)
 	}
 }
+
+func TestQwenMalformedRawToolJSONTriggersRecovery(t *testing.T) {
+	result := parsedMimoChat{CleanText: `{"name":"web_search","arguments":{"query":"Go docs"`, FinishReason: "stop"}
+	if !shouldRetryQwenAgentToolCall(result, "auto", []models.Message{{Role: "tool", Content: "previous result"}}) {
+		t.Fatal("raw incomplete tool JSON must trigger recovery instead of leaking as content")
+	}
+}
+
+func TestFilterAllowedToolCallsRejectsMalformedArguments(t *testing.T) {
+	tools := []models.Tool{{Type: "function", Function: models.ToolDefinition{Name: "web_search"}}}
+	calls := []models.ToolCall{{Type: "function", Function: models.ToolFunction{Name: "web_search", Arguments: `{"query":`}}}
+	if filtered := filterAllowedToolCalls(calls, tools, "auto"); len(filtered) != 0 {
+		t.Fatalf("malformed arguments must not reach the IDE: %+v", filtered)
+	}
+}

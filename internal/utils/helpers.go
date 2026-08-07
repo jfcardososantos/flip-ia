@@ -1,135 +1,119 @@
+/*
+ * File: helpers.go
+ * Project: flip-ai
+ * Created: 2026-04-29
+ *
+ * Last Modified: Wed Apr 29 2026
+ * Modified By: Pedro Farias
+ */
+
 package utils
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"flip-ai/internal/models"
 	"strings"
 	"time"
-	"unicode"
+
+	"github.com/gin-gonic/gin"
 )
 
-// GenerateID generates a unique ID with the given prefix.
-func GenerateID(prefix string) string {
-	timestamp := time.Now().UnixNano()
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", prefix, timestamp)))
-	return prefix + "-" + hex.EncodeToString(hash[:])[:16]
+func GenerateID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
-// MaskValue masks sensitive strings for display.
-func MaskValue(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
+func CreateChatCompletionChunk(id, content, model string, finishReason *string, reasoning string, usage *models.Usage, toolCalls []models.ToolCall) models.ChatCompletionChunk {
+	chunk := models.ChatCompletionChunk{
+		ID:      "chatcmpl-" + id,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []models.Choice{
+			{
+				Index: 0,
+				Delta: models.Delta{},
+				FinishReason: finishReason,
+			},
+		},
 	}
-	if len(trimmed) <= 8 {
-		return trimmed
+
+	if content != "" {
+		chunk.Choices[0].Delta.Content = content
 	}
-	return trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
-}
-
-// GetLoginURL returns the Xiaomi login URL.
-func GetLoginURL() string {
-	return "https://aistudio.xiaomimimo.com/"
-}
-
-// GetQRCodeURL generates a QR code URL for the target.
-func GetQRCodeURL(target string) string {
-	return "https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=" + target
-}
-
-// IsAPIRoute checks if a path is an API route.
-func IsAPIRoute(path string) bool {
-	return strings.HasPrefix(path, "/v1/") ||
-		strings.HasPrefix(path, "/api/") ||
-		path == "/open-apis/bot/chat"
-}
-
-// IsChatRoute checks if a path is a chat completion route.
-func IsChatRoute(path string) bool {
-	return strings.Contains(path, "/chat") ||
-		strings.Contains(path, "/completions") ||
-		path == "/api/generate"
-}
-
-// TrimWhitespace trims whitespace from a string.
-func TrimWhitespace(s string) string {
-	return strings.TrimSpace(s)
-}
-
-// ContainsAny checks if a string contains any of the given substrings.
-func ContainsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if strings.Contains(s, sub) {
-			return true
-		}
+	if reasoning != "" {
+		chunk.Choices[0].Delta.ReasoningContent = reasoning
 	}
-	return false
-}
-
-// ParseCookie parses a raw cookie string into a map of key-value pairs.
-func ParseCookie(rawCookie string) map[string]string {
-	result := make(map[string]string)
-	parts := strings.Split(rawCookie, ";")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) == 2 {
-			result[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
-		} else if len(kv) == 1 {
-			result[strings.TrimSpace(kv[0])] = ""
-		}
+	if toolCalls != nil {
+		chunk.Choices[0].Delta.ToolCalls = toolCalls
 	}
-	return result
-}
-
-// EncodeBase64 encodes data to base64.
-func EncodeBase64(data []byte) string {
-	return "" // placeholder
-}
-
-// DecodeBase64 decodes base64 data.
-func DecodeBase64(encoded string) ([]byte, error) {
-	return nil, nil // placeholder
-}
-
-// IsValidEmail checks if a string is a valid email address.
-func IsValidEmail(email string) bool {
-	return strings.Contains(email, "@") && strings.Contains(email, ".")
-}
-
-// TruncateString truncates a string to the given length.
-func TruncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+	if usage != nil {
+		chunk.Usage = usage
 	}
-	return s[:maxLen] + "..."
+	return chunk
 }
 
-// ToSnakeCase converts a string to snake_case.
-func ToSnakeCase(s string) string {
-	var result []rune
-	for i, r := range s {
-		if unicode.IsUpper(r) && i > 0 {
-			result = append(result, '_')
-		}
-		result = append(result, unicode.ToLower(r))
+func SendError(c *gin.Context, status int, message, errorType string, code *string) {
+	c.JSON(status, models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Message: message,
+			Type:    errorType,
+			Param:   nil,
+			Code:    code,
+		},
+	})
+}
+
+func PointerToString(s string) *string {
+	return &s
+}
+
+// WriteSSEChunk writes one OpenAI-style SSE data frame.
+func WriteSSEChunk(c *gin.Context, chunk models.ChatCompletionChunk) {
+	b, _ := json.Marshal(chunk)
+	c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", string(b)))
+	c.Writer.Flush()
+}
+
+// EmitStreamToolCall sends tool call deltas in the OpenAI streaming shape (id/name, then arguments).
+func EmitStreamToolCall(c *gin.Context, completionID, model string, tc models.ToolCall) {
+	callID := tc.ID
+	if callID == "" {
+		callID = "call_" + GenerateID()
 	}
-	return string(result)
-}
+	idx := tc.Index
 
-// ParseToolCalls is a placeholder function for tool call parsing.
-func ParseToolCalls(text string) (string, []interface{}) {
-	return text, nil
-}
+	nameChunk := CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{{
+		Index: idx,
+		ID:    callID,
+		Type:  "function",
+		Function: models.ToolFunction{
+			Name: tc.Function.Name,
+		},
+	}})
+	WriteSSEChunk(c, nameChunk)
 
-// ShouldEnableWebSearch determines if web search should be enabled.
-func ShouldEnableWebSearch(model string, explicitFlag bool, _ interface{}) bool {
-	if explicitFlag {
-		return true
+	args := strings.TrimSpace(tc.Function.Arguments)
+	if args == "" {
+		args = "{}"
 	}
-	return strings.Contains(strings.ToLower(model), "search")
+	argsChunk := CreateChatCompletionChunk(completionID, "", model, nil, "", nil, []models.ToolCall{{
+		Index: idx,
+		Function: models.ToolFunction{
+			Arguments: args,
+		},
+	}})
+	WriteSSEChunk(c, argsChunk)
+}
+
+// FinalizeChatStream emits the terminal OpenAI SSE frames (finish_reason + [DONE]).
+func FinalizeChatStream(c *gin.Context, completionID, model, finishReason string, usage *models.Usage) {
+	fr := finishReason
+	WriteSSEChunk(c, CreateChatCompletionChunk(completionID, "", model, &fr, "", usage, nil))
+	c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
 }

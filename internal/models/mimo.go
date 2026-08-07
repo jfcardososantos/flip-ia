@@ -1,48 +1,31 @@
-/*
- * File: mimo.go
- * Project: flip-ai
- * Created: 2026-04-29
- */
-
 package models
 
-type Auth struct {
-	Cookie string
-	Ph     string
-	Token  string
-	UserID string
-}
-
-type MultiMedia struct {
-	MediaType         string `json:"mediaType"`
-	FileUrl           string `json:"fileUrl"`
-	CompressedVideoUrl string `json:"compressedVideoUrl"`
-	AudioTrackUrl      string `json:"audioTrackUrl"`
-	Name              string `json:"name"`
-	Size              int64  `json:"size"`
-	Status            string `json:"status"`
-	ObjectName        string `json:"objectName"`
-	TokenUsage        int    `json:"tokenUsage"`
-	URL               string `json:"url"`
-}
-
+// MimoPayload represents the request payload for the Xiaomi Mimo API.
 type MimoPayload struct {
-	MsgID          string      `json:"msgId"`
-	ConversationID string      `json:"conversationId"`
+	MsgID          string      `json:"msg_id"`
+	ConversationID string      `json:"conversation_id"`
 	Query          string      `json:"query"`
-	IsEditedQuery  bool        `json:"isEditedQuery"`
-	ModelConfig    ModelConfig `json:"modelConfig"`
-	MultiMedias    []MultiMedia `json:"multiMedias"`
+	IsEditedQuery  bool        `json:"is_edited_query"`
+	ModelConfig    ModelConfig `json:"model_config"`
 }
 
+// ModelConfig represents the model configuration for Mimo requests.
 type ModelConfig struct {
-	EnableThinking  bool   `json:"enableThinking"`
-	WebSearchStatus string `json:"webSearchStatus"`
+	EnableThinking  bool   `json:"enable_thinking"`
+	WebSearchStatus string `json:"web_search_status"`
 	Model           string `json:"model"`
 }
 
+// MimoResponse represents the response from the Xiaomi Mimo API.
 type MimoResponse struct {
-	Code int         `json:"code"`
-	Msg  string      `json:"msg"`
-	Data interface{} `json:"data"`
+	Message string      `json:"message"`
+	Usage   MimoUsage   `json:"usage"`
+	Error   *string     `json:"error,omitempty"`
+}
+
+// MimoUsage represents token usage from Xiaomi Mimo.
+type MimoUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }

@@ -277,9 +277,44 @@ func chatGPTExecuteDirect(session StoredWebSession, raw []byte, headers map[stri
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		// A Cloudflare mitigation (challenge/block) must be surfaced so the
+		// caller can route the request through the authenticated browser relay
+		// (which solves the captcha) instead of the direct HTTP transport.
+		if isChatGPTCloudflareChallenge(resp.Header, string(body)) {
+			body = []byte("Cloudflare blocked the direct HTTP request" + cloudflareChallengeDetail(resp.Header, string(body)) +
+				"; open chatgpt.com in Chrome and use the relay, or solve the captcha and reimport the session. Original: " + string(body))
+		}
 		return models.DeepSeekChatResult{}, &ChatGPTError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	return parseChatGPTStream(resp.Body)
+}
+
+func isChatGPTCloudflareChallenge(header http.Header, body string) bool {
+	mitigated := strings.ToLower(strings.TrimSpace(header.Get("Cf-Mitigated")))
+	if mitigated == "challenge" || strings.Contains(mitigated, "challenge") {
+		return true
+	}
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "cloudflare") && (strings.Contains(lower, "challenge") || strings.Contains(lower, "captcha") || strings.Contains(lower, "turnstile") || strings.Contains(lower, "blocked") || strings.Contains(lower, "verify you are human")) {
+		return true
+	}
+	for _, marker := range []string{"you have been blocked", "verify you are human", "cf-chl-", "turnstile", "access denied", "blocked by cloudflare"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloudflareChallengeDetail(header http.Header, body string) string {
+	var detail []string
+	if ray := strings.TrimSpace(header.Get("Cf-Ray")); ray != "" {
+		detail = append(detail, " (cf-ray "+ray+")")
+	}
+	if strings.Contains(strings.ToLower(body), "turnstile") {
+		detail = append(detail, " [turnstile]")
+	}
+	return strings.Join(detail, " ")
 }
 
 func chatGPTParseRelayResponse(resp *http.Response) (models.DeepSeekChatResult, error) {

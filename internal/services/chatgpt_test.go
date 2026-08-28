@@ -90,3 +90,26 @@ func TestBuildChatGPTConversationBodyEmbedsSystem(t *testing.T) {
 		t.Errorf("system instruction not embedded in first message: %q", content)
 	}
 }
+
+func TestIsChatGPTCloudflareChallenge(t *testing.T) {
+	header := make(map[string][]string)
+	header["Cf-Mitigated"] = []string{"challenge"}
+	header["Cf-Ray"] = []string{"abc123-GRU"}
+
+	blockedBody := `<html><title>Sorry, you have been blocked</title><body>You are unable to access chatgpt.com. Please verify you are human.</body></html>`
+	if !isChatGPTCloudflareChallenge(header, blockedBody) {
+		t.Error("expected Cf-Mitigated challenge to be detected")
+	}
+
+	if !isChatGPTCloudflareChallenge(make(map[string][]string), blockedBody) {
+		t.Error("expected blocked.html to be detected")
+	}
+
+	if isChatGPTCloudflareChallenge(make(map[string][]string), `{"error":"some_json_error"}`) {
+		t.Error("plain JSON error should not be a Cloudflare challenge")
+	}
+
+	if detail := cloudflareChallengeDetail(header, "turnstile html"); !strings.Contains(detail, "abc123-GRU") || !strings.Contains(detail, "turnstile") {
+		t.Errorf("unexpected detail: %q", detail)
+	}
+}

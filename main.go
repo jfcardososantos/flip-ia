@@ -261,6 +261,14 @@ func setupSecrets() []string {
 			seen[value] = true
 		}
 	}
+	// A single API key is used everywhere: a key stored/configured for
+	// inference must also open the setup, relay and extension routes.
+	if stored, err := services.LoadStoredAuth(); err == nil {
+		if value := strings.TrimSpace(stored.RequestAPIKey); value != "" && !seen[value] {
+			secrets = append(secrets, value)
+			seen[value] = true
+		}
+	}
 	return secrets
 }
 

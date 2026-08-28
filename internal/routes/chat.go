@@ -974,7 +974,7 @@ func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, complet
 		message := "Failed to call ChatGPT Web: " + outcome.err.Error()
 		fmt.Printf("[%s] ChatGPT Web upstream error: %v\n", completionID, outcome.err)
 		if services.IsChatGPTAuthError(outcome.err) {
-			message += ". ChatGPT requested authentication or presented a security challenge; open chatgpt.com in Chrome, log in and import the session again (and keep the extension relay active)."
+			message += ". O ChatGPT pediu autenticação ou exibiu um desafio de segurança (Cloudflare/Turnstile). Abra chatgpt.com no Chrome, faça login e reimporte a sessão pela extensão, mantenha a aba autenticada aberta com o relay ativo e, se aparecer um captcha, resolva-o no navegador."
 		}
 		if status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests {
 			c.Header("Retry-After", "2")

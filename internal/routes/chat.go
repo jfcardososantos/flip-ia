@@ -972,6 +972,7 @@ func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, complet
 	if outcome.err != nil {
 		status := services.ChatGPTProxyStatus(outcome.err)
 		message := "Failed to call ChatGPT Web: " + outcome.err.Error()
+		fmt.Printf("[%s] ChatGPT Web upstream error: %v\n", completionID, outcome.err)
 		if services.IsChatGPTAuthError(outcome.err) {
 			message += ". ChatGPT requested authentication or presented a security challenge; open chatgpt.com in Chrome, log in and import the session again (and keep the extension relay active)."
 		}

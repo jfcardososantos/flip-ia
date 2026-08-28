@@ -21,6 +21,7 @@ Os endpoints públicos não exigem token do cliente. A autenticação com a Xiao
 - Dashboard local para operação e teste
 - Extensão para importar sessões autenticadas suportadas
 - Qwen Web com conversa real persistida no `chat.qwen.ai`, continuidade por `chat_id` e rollover automático
+- ChatGPT Web via sessão do navegador, com relay autenticado e fallback por HTTP direto
 - Catálogo de modelos atualizado automaticamente no boot e em intervalos configuráveis
 
 ## Como funciona a autenticação
@@ -116,7 +117,11 @@ Além dos modelos `mimo-*`, o endpoint `POST /v1/chat/completions` roteia automa
 | `qwen-web` | Alias do modelo Qwen Web principal atual | importe a sessão Qwen pela extensão |
 | `qwen-web/qwen3.8-max` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
 | `qwen-web/qwen3.7-plus` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
-| `qwen-web/qwen3.7-max` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
+ | `qwen-web/qwen3.7-max` | Qwen Web, contexto anunciado de 1M | importe a sessão Qwen pela extensão |
+| `chatgpt-web` | Alias do modelo ChatGPT Web principal atual (`gpt-4o`) | importe a sessão ChatGPT pela extensão |
+| `chatgpt-web/gpt-4o` | ChatGPT Web | importe a sessão ChatGPT pela extensão |
+| `chatgpt-web/gpt-5` | ChatGPT Web | importe a sessão ChatGPT pela extensão |
+| `chatgpt-web/o3` | ChatGPT Web (raciocínio) | importe a sessão ChatGPT pela extensão |
 | `openrouter/meta-llama/llama-3.1-8b-instruct:free` | OpenRouter | `OPENROUTER_API_KEY` |
 | `cf/@cf/meta/llama-3.1-8b-instruct` | Cloudflare Workers AI | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID` |
 
@@ -325,7 +330,7 @@ Importa uma sessão web genérica por provedor. Payload típico:
 }
 ```
 
-Os adapters web implementados são `deepseek`, `kimi` e `qwen`. No Qwen, o proxy cria uma conversa real na conta, persiste `chat_id` e `parent_message_id` no SQLite e envia somente os turnos novos. Ao atingir `QWEN_WEB_ROLLOVER_TOKENS`, ele abre automaticamente outra conversa com um handoff do contexto recente.
+Os adapters web implementados são `deepseek`, `kimi`, `qwen` e `chatgpt`. No Qwen, o proxy cria uma conversa real na conta, persiste `chat_id` e `parent_message_id` no SQLite e envia somente os turnos novos. Ao atingir `QWEN_WEB_ROLLOVER_TOKENS`, ele abre automaticamente outra conversa com um handoff do contexto recente.
 
 Variáveis opcionais do Qwen:
 
@@ -355,6 +360,27 @@ Para garantir que várias chamadas continuem exatamente no mesmo chat Qwen, envi
 ```
 
 Sem `user`, o proxy deriva a sessão da primeira mensagem do usuário.
+
+### ChatGPT Web
+
+O adapter do ChatGPT usa a sessão do navegador (cookie jar coletado pela extensão no `chatgpt.com`) e chama o endpoint privado `/backend-api/conversation` com o access token (obtido de `WebSessionToken` ou buscado em `/api/auth/session`). Ele tenta dois transportes:
+
+1. **Relay do navegador** (quando conectado): a extensão executa a chamada dentro da aba autenticada do `chatgpt.com`, que carrega o contexto Cloudflare/Turnstile — o caminho mais confiável.
+2. **HTTP direto do servidor** (fallback): usado quando a ponte não está conectada, reproduzindo cookies e headers de navegador.
+
+Como o ChatGPT tem proteção anti-bot e tokens que expiram, mantenha o Chrome aberto com uma sessão válida no `chatgpt.com` para o relay funcionar. Se aparecer um desafio (`cloudflare`/`turnstile`), reimporte a sessão pela extensão.
+
+O alias `chatgpt-web` usa o modelo principal (`gpt-4o` por padrão, ajustável com `CHATGPT_WEB_DEFAULT_MODEL`). Para usar um modelo específico, use `chatgpt-web/<modelo>` (ex.: `chatgpt-web/gpt-5`, `chatgpt-web/o3`).
+
+Variáveis opcionais:
+
+```env
+CHATGPT_WEB_DEFAULT_MODEL=gpt-4o
+CHATGPT_WEB_LANGUAGE=pt-BR
+CHATGPT_WEB_ORGANIZATION=
+CHATGPT_BROWSER_RELAY_PRESENCE_SECONDS=45
+CHATGPT_BROWSER_RELAY_TIMEOUT_SECONDS=300
+```
 
 ## Integração com IDEs e clientes
 

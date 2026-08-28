@@ -156,6 +156,7 @@ func appendDeepSeekModels(modelsList []map[string]interface{}) []map[string]inte
 	})
 	modelsList = append(modelsList, services.OfficialProviderModels()...)
 	modelsList = append(modelsList, services.QwenWebModels()...)
+	modelsList = append(modelsList, services.ChatGPTCatalogModels()...)
 	modelsList = append(modelsList, services.DeepSeekWebModels()...)
 	modelsList = append(modelsList,
 		map[string]interface{}{
@@ -450,6 +451,10 @@ func handleChatCompletions(c *gin.Context) {
 	}
 	if services.IsQwenWebModel(targetModel) {
 		handleQwenChatCompletions(c, input, completionID, cacheKey, targetModel)
+		return
+	}
+	if services.IsChatGPTWebModel(targetModel) {
+		handleChatGPTChatCompletions(c, input, completionID, cacheKey, targetModel)
 		return
 	}
 
@@ -929,6 +934,150 @@ func handleQwenChatCompletions(c *gin.Context, input openAIChatInput, completion
 	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result, responseCalls)
 	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
 	c.JSON(http.StatusOK, response)
+}
+
+func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, completionID string, cacheKey string, targetModel string) {
+	session, err := services.GetSelectedChatGPTSession()
+	if err != nil {
+		utils.SendError(c, http.StatusServiceUnavailable, "Invalid ChatGPT Web session: "+err.Error(), "server_error", nil)
+		return
+	}
+	upstreamModel, ok := services.ResolveChatGPTWebModel(targetModel)
+	if !ok {
+		utils.SendError(c, http.StatusBadRequest, "Unsupported ChatGPT Web model: "+targetModel, "invalid_request_error", nil)
+		return
+	}
+	agentMode := len(input.Tools) > 0
+	messages := append([]models.Message{}, input.Messages...)
+	toolChoice := resolveToolChoice(input.ToolChoice)
+	sessionHandle := strings.TrimSpace(input.User)
+	if sessionHandle == "" {
+		sessionHandle = services.GenerateFingerprint(input.Messages)
+	}
+	if agentMode {
+		toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
+		toolInstructions += chatGPTAgentAdapterInstructions()
+		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
+	}
+
+	outcome := chatGPTBufferedOutcome{}
+	outcome = awaitChatGPTBufferedResult(c, input.Stream, func() chatGPTBufferedOutcome {
+		result, chatErr := services.ChatGPTWebChat(session, upstreamModel, messages)
+		if chatErr == nil && agentMode {
+			result, chatErr = recoverChatGPTAgentToolCall(result, session, upstreamModel, messages, toolChoice, completionID, input.Tools)
+		}
+		return chatGPTBufferedOutcome{result: result, err: chatErr}
+	})
+	result := outcome.result
+	if outcome.err != nil {
+		status := services.ChatGPTProxyStatus(outcome.err)
+		message := "Failed to call ChatGPT Web: " + outcome.err.Error()
+		if services.IsChatGPTAuthError(outcome.err) {
+			message += ". ChatGPT requested authentication or presented a security challenge; open chatgpt.com in Chrome, log in and import the session again (and keep the extension relay active)."
+		}
+		if status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests {
+			c.Header("Retry-After", "2")
+		}
+		if input.Stream && c.Writer.Written() {
+			sendDeepSeekBufferedError(c, true, fmt.Errorf("%s", message))
+		} else {
+			utils.SendError(c, status, message, "server_error", nil)
+		}
+		return
+	}
+	content, toolCalls := utils.ParseToolCalls(result.Content)
+	if agentMode {
+		toolCalls = filterAllowedToolCalls(toolCalls, input.Tools, toolChoice)
+	}
+	toolCalls = finalizeToolCalls(toolCalls)
+	responseCalls := responseToolCalls(toolCalls, input.ParallelToolCalls, agentMode)
+	if len(toolCalls) > 0 {
+		content = ""
+		result.ReasoningText = ""
+		if sessionHandle != "" {
+			storePendingToolCalls(sessionHandle, toolCalls)
+		}
+	}
+	result.Content = content
+	result.Usage.PromptTokens = len(buildDeepSeekPrompt(input.Messages)) / 4
+	result.Usage.TotalTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
+	if sessionHandle != "" {
+		services.SaveMessage(sessionHandle, "asst_"+completionID, "assistant", assistantTranscript(content, result.ReasoningText))
+	}
+	if input.Stream {
+		writeDeepSeekStreamResponse(c, completionID, targetModel, result, responseCalls)
+		return
+	}
+	response := buildDeepSeekNonStreamResponse(completionID, targetModel, result, responseCalls)
+	services.GlobalCache.Set(cacheKey, response, 5*time.Minute)
+	c.JSON(http.StatusOK, response)
+}
+
+type chatGPTBufferedOutcome struct {
+	result models.DeepSeekChatResult
+	err    error
+}
+
+func awaitChatGPTBufferedResult(c *gin.Context, stream bool, job func() chatGPTBufferedOutcome) chatGPTBufferedOutcome {
+	if !stream {
+		return job()
+	}
+	resultCh := make(chan chatGPTBufferedOutcome, 1)
+	go func() { resultCh <- job() }()
+	ticker := time.NewTicker(12 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-resultCh:
+			return result
+		case <-ticker.C:
+			c.Header("Content-Type", "text/event-stream; charset=utf-8")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			c.Header("X-Accel-Buffering", "no")
+			c.Writer.WriteString(": mimo keep-alive\n\n")
+			c.Writer.Flush()
+		case <-c.Request.Context().Done():
+			return chatGPTBufferedOutcome{err: c.Request.Context().Err()}
+		}
+	}
+}
+
+func chatGPTAgentAdapterInstructions() string {
+	return `
+## ChatGPT adapter — tools are real
+- You are operating inside Hermes Agent or an IDE agent such as Kilo Code. Every tool listed above is real and is executed by the host after you emit its XML call.
+- Never claim that you cannot access tools, files, credentials, skills, a terminal, or the browser merely because you cannot access them directly inside the language model. Use the matching host tool.
+- For a requested external action, respond with exactly one valid <tool_call> block and wait for its result. Do not replace execution with instructions, sample code, or a refusal.
+- Tool names must exactly match the names listed above. Never invent tools such as ipython, python, browser, or shell unless that exact name is listed.
+`
+}
+
+func recoverChatGPTAgentToolCall(first models.DeepSeekChatResult, session services.StoredWebSession, model string, messages []models.Message, toolChoice, completionID string, tools []models.Tool) (models.DeepSeekChatResult, error) {
+	result := first
+	for attempt := 0; attempt < 2; attempt++ {
+		clean, calls := utils.ParseToolCalls(result.Content)
+		calls = filterAllowedToolCalls(calls, tools, toolChoice)
+		if len(calls) > 0 {
+			return result, nil
+		}
+		parsed := parsedMimoChat{CleanText: clean, ReasoningText: result.ReasoningText, ToolCalls: calls}
+		if !shouldRetryAgentToolCall(parsed, toolChoice) {
+			return result, nil
+		}
+		retryMessages := append([]models.Message{}, messages...)
+		if strings.TrimSpace(result.Content) != "" {
+			retryMessages = append(retryMessages, models.Message{Role: "assistant", Content: result.Content})
+		}
+		retryMessages = append(retryMessages, models.Message{Role: "user", Content: buildAgentToolRetryQuery("", parsed)})
+		next, err := services.ChatGPTWebChat(session, model, retryMessages)
+		if err != nil {
+			fmt.Printf("[%s] ChatGPT agent recovery failed: %v\n", completionID, err)
+			return result, err
+		}
+		result = next
+	}
+	return result, nil
 }
 
 func buildQwenPrompt(messages []models.Message, toolInstructions string) string {

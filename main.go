@@ -486,6 +486,17 @@ func providerRows(stored services.StoredAuth, storedErr error) []gin.H {
 		"Detail":     errString(deepSeekErr),
 	})
 
+	_, chatgptErr := services.GetSelectedChatGPTSession()
+	chatgptConfigured := chatgptErr == nil
+	rows = append(rows, gin.H{
+		"Name":       "ChatGPT Web",
+		"Key":        "chatgpt",
+		"Configured": chatgptConfigured,
+		"Source":     sourceWhenConfigured(chatgptConfigured, "data/auth.json"),
+		"Status":     statusLabel(chatgptConfigured),
+		"Detail":     errString(chatgptErr),
+	})
+
 	geminiConfigured, geminiSource := providerConfiguredFromEnvOrStore("GEMINI_API_KEY", stored.GeminiAPIKey)
 	groqConfigured, groqSource := providerConfiguredFromEnvOrStore("GROQ_API_KEY", stored.GroqAPIKey)
 	openRouterConfigured, openRouterSource := providerConfiguredFromEnvOrStore("OPENROUTER_API_KEY", stored.OpenRouterAPIKey)
@@ -535,6 +546,15 @@ func availableModelRows() []gin.H {
 			description, _ := model["description"].(string)
 			if id != "" {
 				rows = append(rows, gin.H{"ID": id, "Provider": "Qwen Web", "Description": description})
+			}
+		}
+	}
+	if _, err := services.GetSelectedChatGPTSession(); err == nil {
+		for _, model := range services.ChatGPTCatalogModels() {
+			id, _ := model["id"].(string)
+			description, _ := model["description"].(string)
+			if id != "" {
+				rows = append(rows, gin.H{"ID": id, "Provider": "ChatGPT Web", "Description": description})
 			}
 		}
 	}
@@ -1172,8 +1192,9 @@ func main() {
 				"DEFAULT_MODEL":           maskValue(stored.DefaultModel),
 				"REQUEST_API_KEY":         maskValue(stored.RequestAPIKey),
 			},
-			"webSessions": maskedWebSessions(stored),
-			"qwenRelay":   services.QwenBrowserRelayStatus(),
+			"webSessions":  maskedWebSessions(stored),
+			"qwenRelay":    services.QwenBrowserRelayStatus(),
+			"chatgptRelay": services.ChatGPTBrowserRelayStatus(),
 			"selectedAuth": gin.H{
 				"token":  maskValue(auth.Token),
 				"userID": maskValue(auth.UserID),
@@ -1219,6 +1240,49 @@ func main() {
 			return
 		}
 		if err := services.CompleteQwenBrowserRelayJob(result); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"accepted": true})
+	})
+
+	r.GET("/auth/chatgpt/relay/status", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		c.JSON(http.StatusOK, services.ChatGPTBrowserRelayStatus())
+	})
+
+	r.GET("/auth/chatgpt/relay/next", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		job, ok := services.WaitNextChatGPTBrowserRelayJob(c.Request.Context(), 25*time.Second)
+		if !ok {
+			c.Status(http.StatusNoContent)
+			return
+		}
+		c.JSON(http.StatusOK, job)
+	})
+
+	r.POST("/auth/chatgpt/relay/reset", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		cancelled := services.ResetChatGPTBrowserRelay("browser extension reloaded")
+		c.JSON(http.StatusOK, gin.H{"reset": true, "cancelled": cancelled})
+	})
+
+	r.POST("/auth/chatgpt/relay/result", func(c *gin.Context) {
+		if !validateSetupAccess(c) {
+			return
+		}
+		var result services.ChatGPTBrowserRelayResult
+		if err := c.ShouldBindJSON(&result); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ChatGPT relay result", "details": err.Error()})
+			return
+		}
+		if err := services.CompleteChatGPTBrowserRelayJob(result); err != nil {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}

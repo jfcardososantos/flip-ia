@@ -469,3 +469,214 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 restartRelay();
+
+// ---------------------------------------------------------------------------
+// ChatGPT Web relay (chatgpt.com)
+// Mirrors the Qwen relay transport so requests run inside the authenticated
+// chatgpt.com tab, which carries the Cloudflare cookies/turnstile context that
+// the server-side direct client cannot reproduce reliably.
+// ---------------------------------------------------------------------------
+let chatgptRelayGeneration = 0;
+let chatgptRelayActiveGeneration = 0;
+let chatgptRelayLastActivityAt = 0;
+let chatgptRelayJobInProgress = false;
+
+const CHATGPT_URL = "https://chatgpt.com/";
+const CHATGPT_TAB_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
+const CHATGPT_TERMINAL = ["response.completed", "message.completed", "response.finished", "message.finished", "[DONE]"];
+
+async function chatgptTab() {
+  let tabs = [];
+  for (const pattern of CHATGPT_TAB_PATTERNS) {
+    tabs = tabs.concat(await chrome.tabs.query({ url: pattern }));
+  }
+  let tab = tabs.find((item) => item.id);
+  if (!tab) {
+    tab = await chrome.tabs.create({ url: CHATGPT_URL, active: false });
+  }
+  if (!tab || !tab.id) throw new Error("Não foi possível abrir a aba autenticada do ChatGPT.");
+  await waitForTab(tab.id);
+  return tab;
+}
+
+async function executeChatGPTJob(job) {
+  const tab = await chatgptTab();
+  const [execution] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    args: [job],
+    func: async (relayJob) => {
+      const terminalSignals = relayJob.terminal || [];
+      const isDone = (text) => {
+        if (text.includes("data: [DONE]")) return true;
+        const lines = text.split(/\r?\n/).filter((l) => l.startsWith("data:"));
+        for (const line of lines) {
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (typeof parsed !== "object" || parsed === null) continue;
+            for (const key of Object.keys(parsed)) {
+              if (terminalSignals.some((sig) => String(key).toLowerCase() === sig)) return true;
+            }
+            if (String(parsed.message_type || "").toLowerCase() === "done") return true;
+          } catch (_error) {
+            continue;
+          }
+        }
+        return false;
+      };
+      const requestOptions = {
+        method: relayJob.method || "POST",
+        credentials: "include",
+        headers: relayJob.headers || {},
+        body: relayJob.body || undefined
+      };
+      const isConversation = String(relayJob.url || "").includes("/backend-api/conversation");
+      const response = await fetch(relayJob.url, requestOptions);
+      const responseHeaders = {};
+      for (const [key, value] of response.headers.entries()) {
+        responseHeaders[key] = value;
+      }
+      const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      let body = "";
+      if (contentType.includes("event-stream") || contentType.includes("text/plain")) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let latest = "";
+        const push = (chunk) => {
+          const text = decoder.decode(chunk, { stream: true });
+          buffer += text;
+          latest += text;
+          if (buffer.length > 8 * 1024 * 1024) buffer = buffer.slice(-8 * 1024 * 1024);
+        };
+        let done = false;
+        while (!done) {
+          const { value, done: streamDone } = await reader.read();
+          done = streamDone;
+          if (value) {
+            push(value);
+            if (isConversation && isDone(latest)) done = true;
+          }
+          if (!isConversation && latest.length > (16 * 1024 * 1024)) done = true;
+        }
+        body = buffer;
+      } else {
+        body = await response.text();
+      }
+      return {
+        status: response.status,
+        headers: responseHeaders,
+        body
+      };
+    }
+  });
+  if (!execution) throw new Error("A aba do ChatGPT não retornou o resultado da chamada.");
+  if (execution.error) throw new Error(execution.error.message || String(execution.error));
+  return execution.result;
+}
+
+async function submitChatGPTRelayResult(config, payload) {
+  const response = await fetch(`${config.proxyUrl}/auth/chatgpt/relay/result`, {
+    method: "POST",
+    headers: adminHeaders(config.apiKey, true),
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok && response.status !== 409) {
+    throw new Error(`O proxy recusou o resultado ChatGPT: HTTP ${response.status}`);
+  }
+}
+
+async function handleChatGPTRelayJob(config, job) {
+  let payload;
+  try {
+    const result = await executeChatGPTJob({ ...job, terminal: CHATGPT_TERMINAL });
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`ChatGPT HTTP ${result.status}; body=${String(result.body || "").slice(0, 500)}`);
+    }
+    payload = {
+      job_id: job.id,
+      status: result.status,
+      headers: result.headers || {},
+      body: result.body || ""
+    };
+  } catch (error) {
+    payload = {
+      job_id: job.id,
+      status: 0,
+      headers: {},
+      body: "",
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+  await submitChatGPTRelayResult(config, payload);
+}
+
+async function runChatGPTRelayLoop(generation) {
+  chatgptRelayActiveGeneration = generation;
+  chatgptRelayLastActivityAt = Date.now();
+  let resetSent = false;
+  while (generation === chatgptRelayGeneration) {
+    const config = await relayConfig();
+    if (!config.proxyUrl) {
+      await delay(10000);
+      continue;
+    }
+    try {
+      chatgptRelayLastActivityAt = Date.now();
+      if (!resetSent) {
+        const resetResponse = await fetch(`${config.proxyUrl}/auth/chatgpt/relay/reset`, {
+          method: "POST",
+          headers: adminHeaders(config.apiKey, true),
+          body: "{}"
+        });
+        if (!resetResponse.ok) throw new Error(`Falha ao reiniciar a ponte ChatGPT: HTTP ${resetResponse.status}`);
+        resetSent = true;
+        chatgptRelayLastActivityAt = Date.now();
+      }
+      const response = await fetch(`${config.proxyUrl}/auth/chatgpt/relay/next`, {
+        method: "GET",
+        headers: adminHeaders(config.apiKey),
+        cache: "no-store"
+      });
+      if (generation !== chatgptRelayGeneration) return;
+      chatgptRelayLastActivityAt = Date.now();
+      if (response.status === 204) continue;
+      if (!response.ok) {
+        await delay(5000);
+        continue;
+      }
+      const job = await response.json();
+      chatgptRelayJobInProgress = true;
+      try {
+        await handleChatGPTRelayJob(config, job);
+      } finally {
+        chatgptRelayJobInProgress = false;
+        chatgptRelayLastActivityAt = Date.now();
+      }
+    } catch (error) {
+      await delay(3000);
+    }
+  }
+}
+
+function restartChatGPTRelay() {
+  chatgptRelayGeneration += 1;
+  chatgptRelayActiveGeneration = chatgptRelayGeneration;
+  chatgptRelayLastActivityAt = Date.now();
+  void chatgptTab().catch(() => {});
+  void runChatGPTRelayLoop(chatgptRelayGeneration);
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message && message.type === "restart-chatgpt-relay") restartChatGPTRelay();
+});
+chrome.alarms.create("chatgpt-relay-keepalive", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== "chatgpt-relay-keepalive") return;
+  const stale = Date.now() - chatgptRelayLastActivityAt > 45000;
+  if (chatgptRelayGeneration === 0 || chatgptRelayActiveGeneration !== chatgptRelayGeneration || (stale && !chatgptRelayJobInProgress)) restartChatGPTRelay();
+});
+
+restartChatGPTRelay();

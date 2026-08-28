@@ -233,6 +233,10 @@ func DeepSeekWebModels() []map[string]interface{} {
 	return CatalogModelsForProviders("deepseek")
 }
 
+func ChatGPTCatalogModels() []map[string]interface{} {
+	return CatalogModelsForProviders("chatgpt")
+}
+
 func XiaomiCatalogModels() []map[string]interface{} {
 	return CatalogModelsForProviders("xiaomi")
 }
@@ -333,14 +337,24 @@ func fallbackModelCatalog() ModelCatalogSnapshot {
 		{ID: "qwen-web/qwen3.7-max", Provider: "qwen", OwnedBy: "qwen", Description: "Qwen Web model", ContextLength: 1000000},
 		{ID: "deepseek-v4-flash", Provider: "deepseek", OwnedBy: "deepseek", Description: "DeepSeek official model via Web Instant mode", ContextLength: 1000000},
 		{ID: "deepseek-v4-pro", Provider: "deepseek", OwnedBy: "deepseek", Description: "DeepSeek official model via Web Expert mode", ContextLength: 1000000},
+		{ID: "chatgpt-web", Provider: "chatgpt", OwnedBy: "openai", Description: "Alias for the current ChatGPT Web default model", ContextLength: 128000},
+		{ID: "chatgpt-web/gpt-4o", Provider: "chatgpt", OwnedBy: "openai", Description: "ChatGPT Web model", ContextLength: 128000},
+		{ID: "chatgpt-web/gpt-4o-mini", Provider: "chatgpt", OwnedBy: "openai", Description: "ChatGPT Web model", ContextLength: 128000},
+		{ID: "chatgpt-web/gpt-5", Provider: "chatgpt", OwnedBy: "openai", Description: "ChatGPT Web model", ContextLength: 128000},
+		{ID: "chatgpt-web/gpt-5-mini", Provider: "chatgpt", OwnedBy: "openai", Description: "ChatGPT Web model", ContextLength: 128000},
+		{ID: "chatgpt-web/o3", Provider: "chatgpt", OwnedBy: "openai", Description: "ChatGPT Web reasoning model", ContextLength: 200000},
+		{ID: "chatgpt-web/o4-mini", Provider: "chatgpt", OwnedBy: "openai", Description: "ChatGPT Web reasoning model", ContextLength: 200000},
 	}
 	providers := make(map[string]ModelProviderStatus)
-	for _, provider := range []string{"xiaomi", "gemini", "groq", "openrouter", "cloudflare", "qwen", "deepseek"} {
+	for _, provider := range []string{"xiaomi", "gemini", "groq", "openrouter", "cloudflare", "qwen", "deepseek", "chatgpt"} {
 		providers[provider] = ModelProviderStatus{Count: countCatalogProvider(models, provider), Source: "fallback"}
 	}
 	qwenStatus := providers["qwen"]
 	qwenStatus.DefaultModel = "qwen3.8-max"
 	providers["qwen"] = qwenStatus
+	chatgptStatus := providers["chatgpt"]
+	chatgptStatus.DefaultModel = "gpt-4o"
+	providers["chatgpt"] = chatgptStatus
 	return normalizeCatalog(ModelCatalogSnapshot{Models: models, Providers: providers})
 }
 

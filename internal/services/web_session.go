@@ -65,8 +65,8 @@ func WebProviderDefinitions() []WebProviderDefinition {
 			ID:          "chatgpt-web",
 			Name:        "ChatGPT Web",
 			LoginURL:    "https://chatgpt.com/",
-			Description: "Sessão web armazenável; adapter ainda não implementado.",
-			Implemented: false,
+			Description: "Adapter web implementado com cookie do navegador, access token e relay com fallback direto.",
+			Implemented: true,
 		},
 		{
 			ID:          "claude-web",
@@ -206,6 +206,11 @@ func ValidateWebSessionInput(provider string, session StoredWebSession) (StoredW
 	case "qwen":
 		if WebSessionToken(session) == "" && session.Cookie == "" {
 			return StoredWebSession{}, errors.New("missing Qwen token from localStorage/cookie or raw cookie jar")
+		}
+		session.Token = WebSessionToken(session)
+	case "chatgpt":
+		if session.Cookie == "" {
+			return StoredWebSession{}, errors.New("missing ChatGPT cookie jar")
 		}
 		session.Token = WebSessionToken(session)
 	default:

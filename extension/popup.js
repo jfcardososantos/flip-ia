@@ -6,6 +6,8 @@ const importButton = document.getElementById("importSession");
 const importDeepSeekButton = document.getElementById("importDeepSeekSession");
 const importKimiButton = document.getElementById("importKimiSession");
 const importQwenButton = document.getElementById("importQwenSession");
+const importChatGPTButton = document.getElementById("importChatGPTSession");
+const openChatGPTButton = document.getElementById("openChatGPT");
 const openXiaomiButton = document.getElementById("openXiaomi");
 const openDeepSeekButton = document.getElementById("openDeepSeek");
 const openKimiButton = document.getElementById("openKimi");
@@ -34,6 +36,8 @@ const GEMINI_KEYS_URL = "https://aistudio.google.com/app/apikey";
 const GROQ_KEYS_URL = "https://console.groq.com/keys";
 const OPENROUTER_KEYS_URL = "https://openrouter.ai/settings/keys";
 const CLOUDFLARE_KEYS_URL = "https://dash.cloudflare.com/profile/api-tokens";
+const CHATGPT_CHAT_URL = "https://chatgpt.com/";
+const CHATGPT_COOKIE_URLS = ["https://chatgpt.com/", "https://chat.openai.com/"];
 const COOKIE_NAMES = ["serviceToken", "userId", "xiaomichatbot_ph"];
 const COOKIE_URLS = [
   "https://aistudio.xiaomimimo.com/",
@@ -443,8 +447,115 @@ async function importQwenSession() {
   }
 }
 
-function providerHeaders() {
-  const headers = {
+async function collectChatGPTRawCookieJar() {
+  const seen = new Map();
+  for (const url of CHATGPT_COOKIE_URLS) {
+    for (const cookie of await chrome.cookies.getAll({ url })) {
+      if (cookie && cookie.name) seen.set(cookie.name, cookie.value);
+    }
+  }
+  const fallbackCookies = await chrome.cookies.getAll({});
+  for (const cookie of fallbackCookies) {
+    if (!cookie || !cookie.name || (!cookie.domain.includes("chatgpt.com") && !cookie.domain.includes("openai.com"))) continue;
+    if (!seen.has(cookie.name)) seen.set(cookie.name, cookie.value);
+  }
+  return Array.from(seen.entries()).map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+async function getChatGPTAccessToken() {
+  const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+  const tab = tabs.find((item) => item.id);
+  if (!tab) return "";
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: async () => {
+      try {
+        const sessionResponse = await fetch("/api/auth/session", { credentials: "include" });
+        if (!sessionResponse.ok) return "";
+        const sessions = await sessionResponse.json();
+        if (Array.isArray(sessions) && sessions[0] && sessions[0].accessToken) return sessions[0].accessToken;
+        if (sessions && typeof sessions === "object" && sessions.accessToken) return sessions.accessToken;
+      } catch (_error) {
+        // Fall back to local globals.
+      }
+      try {
+        const node = document.querySelector("#__NEXT_DATA__");
+        if (node && node.textContent) {
+          const data = JSON.parse(node.textContent);
+          const token = data && data.props && data.props.pageProps;
+          // The token is not typically exposed here; kept for forward compatibility.
+        }
+      } catch (_error) {
+        // Ignore.
+      }
+      return "";
+    }
+  });
+  return String(result && result.result || "").trim();
+}
+
+async function importChatGPTSession() {
+  const proxyUrl = normalizeProxyUrl(proxyUrlInput.value);
+  const apiKey = apiKeyInput.value.trim();
+  if (!proxyUrl) {
+    setStatus("Informe a URL do proxy antes de importar.");
+    return;
+  }
+  await chrome.storage.local.set({ proxyUrl, apiKey });
+  setStatus("Lendo cookies da sessão do ChatGPT...");
+  try {
+    const rawCookie = await collectChatGPTRawCookieJar();
+    if (!rawCookie) {
+      throw new Error("Não encontrei cookies de uma sessão ChatGPT autenticada. Abra https://chatgpt.com logado e importe novamente.");
+    }
+    const token = await getChatGPTAccessToken();
+    const browserSession = await (async () => {
+      const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+      const tab = tabs.find((item) => item.id);
+      if (!tab) return { userAgent: navigator.userAgent, origin: "https://chatgpt.com" };
+      const [execution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => ({
+          timezone: new Date().toString().replace(/\s*\(.+\)$/, ""),
+          language: navigator.language || "",
+          userAgent: navigator.userAgent || "",
+          origin: location.origin
+        })
+      });
+      const captured = execution && execution.result || {};
+      return {
+        userAgent: String(captured.userAgent || navigator.userAgent || "").trim(),
+        origin: String(captured.origin || "https://chatgpt.com").trim(),
+        timezone: String(captured.timezone || "").trim(),
+        language: String(captured.language || "").trim()
+      };
+    })();
+    const sessionHeaders = {};
+    if (browserSession.timezone) sessionHeaders.Origin = browserSession.origin;
+    if (browserSession.language) sessionHeaders["Accept-Language"] = browserSession.language;
+
+    const response = await fetch(`${proxyUrl}/auth/web/import`, {
+      method: "POST",
+      headers: providerHeaders(),
+      body: JSON.stringify({
+        provider: "chatgpt",
+        token: token || "",
+        raw_cookie: rawCookie,
+        user_agent: browserSession.userAgent,
+        origin: browserSession.origin,
+        referer: `${browserSession.origin}/`,
+        source: "chrome-extension"
+      })
+    });
+    const bodyText = await response.text();
+    if (response.ok) chrome.runtime.sendMessage({ type: "restart-chatgpt-relay" });
+    setStatus(`HTTP ${response.status} ${response.statusText}\n\n${bodyText}`);
+  } catch (error) {
+    setStatus(`Falha ao importar a sessão ChatGPT.\n\n${error.message || String(error)}`);
+  }
+}
+
+function providerHeaders() {  const headers = {
     "Content-Type": "application/json"
   };
   const apiKey = apiKeyInput.value.trim();
@@ -505,6 +616,10 @@ importQwenButton.addEventListener("click", async () => {
   await saveConfig();
   await importQwenSession();
 });
+importChatGPTButton.addEventListener("click", async () => {
+  await saveConfig();
+  await importChatGPTSession();
+});
 openXiaomiButton.addEventListener("click", () => {
   chrome.tabs.create({ url: XIAOMI_STUDIO_URL });
 });
@@ -516,6 +631,9 @@ openKimiButton.addEventListener("click", () => {
 });
 openQwenButton.addEventListener("click", () => {
   chrome.tabs.create({ url: QWEN_CHAT_URL });
+});
+openChatGPTButton.addEventListener("click", () => {
+  chrome.tabs.create({ url: CHATGPT_CHAT_URL });
 });
 openGeminiButton.addEventListener("click", () => {
   chrome.tabs.create({ url: GEMINI_KEYS_URL });

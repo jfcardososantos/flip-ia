@@ -3,6 +3,7 @@ package services
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"flip-ai/internal/models"
 )
@@ -34,6 +36,9 @@ func ResolveChatGPTWebModel(model string) (string, bool) {
 		if configured := strings.TrimSpace(os.Getenv("CHATGPT_WEB_DEFAULT_MODEL")); configured != "" {
 			return configured, true
 		}
+		if current := strings.TrimSpace(CurrentModelCatalog().Providers["chatgpt"].DefaultModel); current != "" {
+			return current, true
+		}
 		return "gpt-4o", true
 	case strings.HasPrefix(model, "chatgpt-web/"):
 		upstream := strings.TrimSpace(strings.TrimPrefix(model, "chatgpt-web/"))
@@ -47,6 +52,104 @@ func ResolveChatGPTWebModel(model string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+type chatGPTWebModelInfo struct {
+	Slug        string
+	Title       string
+	Description string
+	MaxTokens   int
+	Default     bool
+}
+
+func fetchChatGPTWebModels(ctx context.Context) ([]chatGPTWebModelInfo, string, error) {
+	session, err := GetSelectedChatGPTSession()
+	if err != nil {
+		return nil, "", err
+	}
+	accessToken, err := ChatGPTAccessToken(session)
+	if err != nil {
+		return nil, "", err
+	}
+	endpoint := strings.TrimSpace(os.Getenv("CHATGPT_MODELS_URL"))
+	if endpoint == "" {
+		endpoint = chatGPTWebBaseURL + "/backend-api/models?history_and_training_disabled=false"
+	}
+	headers := ChatGPTHeaders(session, accessToken)
+	headers["Accept"] = "application/json"
+
+	var response *http.Response
+	if ChatGPTBrowserRelayAvailable() {
+		response, err = ChatGPTBrowserRelayRequestContext(ctx, session, http.MethodGet, endpoint, nil, headers)
+	}
+	if response == nil && ctx.Err() == nil {
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if requestErr != nil {
+			return nil, endpoint, requestErr
+		}
+		for key, value := range headers {
+			if value != "" {
+				request.Header.Set(key, value)
+			}
+		}
+		request.Header.Set("Cookie", strings.TrimSpace(session.Cookie))
+		response, err = GlobalHTTPClient.Do(request)
+	}
+	if err != nil {
+		return nil, endpoint, err
+	}
+	if response == nil {
+		return nil, endpoint, errors.New("ChatGPT model discovery returned no response")
+	}
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if readErr != nil {
+		return nil, endpoint, readErr
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, endpoint, &ChatGPTError{StatusCode: response.StatusCode, Body: string(body)}
+	}
+	models, parseErr := parseChatGPTWebModels(body)
+	return models, endpoint, parseErr
+}
+
+func parseChatGPTWebModels(body []byte) ([]chatGPTWebModelInfo, error) {
+	var envelope struct {
+		DefaultModelSlug string `json:"default_model_slug"`
+		DefaultModel     string `json:"default_model"`
+		Models           []struct {
+			Slug        string   `json:"slug"`
+			Title       string   `json:"title"`
+			Description string   `json:"description"`
+			MaxTokens   int      `json:"max_tokens"`
+			Tags        []string `json:"tags"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("invalid ChatGPT model response: %w", err)
+	}
+	defaultModel := firstNonEmpty(envelope.DefaultModelSlug, envelope.DefaultModel)
+	seen := make(map[string]bool)
+	models := make([]chatGPTWebModelInfo, 0, len(envelope.Models))
+	for _, item := range envelope.Models {
+		slug := strings.TrimSpace(item.Slug)
+		if slug == "" || seen[slug] || strings.ContainsAny(slug, " \t\r\n?#/") || strings.Contains(slug, "..") {
+			continue
+		}
+		seen[slug] = true
+		isDefault := slug == defaultModel || containsString(item.Tags, "default")
+		models = append(models, chatGPTWebModelInfo{
+			Slug: slug, Title: strings.TrimSpace(item.Title), Description: strings.TrimSpace(item.Description),
+			MaxTokens: item.MaxTokens, Default: isDefault,
+		})
+	}
+	if len(models) == 0 {
+		return nil, errors.New("ChatGPT Web returned an empty model list")
+	}
+	if defaultModel == "" {
+		models[0].Default = true
+	}
+	return models, nil
 }
 
 func IsChatGPTWebModel(model string) bool {
@@ -83,6 +186,20 @@ func IsChatGPTTransientError(err error) bool {
 	body := strings.ToLower(err.Error())
 	return strings.Contains(body, "empty stream") || strings.Contains(body, "timeout") ||
 		strings.Contains(body, "connection reset") || strings.Contains(body, "unexpected eof")
+}
+
+func IsChatGPTConversationError(err error) bool {
+	var chatErr *ChatGPTError
+	if !errors.As(err, &chatErr) {
+		return false
+	}
+	body := strings.ToLower(chatErr.Body)
+	return chatErr.StatusCode == http.StatusBadRequest ||
+		chatErr.StatusCode == http.StatusNotFound ||
+		chatErr.StatusCode == http.StatusConflict ||
+		strings.Contains(body, "conversation") ||
+		strings.Contains(body, "parent_message") ||
+		strings.Contains(body, "parent message")
 }
 
 func ChatGPTProxyStatus(err error) int {
@@ -126,11 +243,20 @@ func ChatGPTAccessToken(session StoredWebSession) (string, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", &ChatGPTError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
-	var sessions []struct {
+	type chatGPTAuthSession struct {
 		AccessToken string `json:"accessToken"`
 	}
-	if err := json.Unmarshal(body, &sessions); err != nil {
-		return "", fmt.Errorf("invalid ChatGPT session response: %w", err)
+	var sessions []chatGPTAuthSession
+	if len(bytes.TrimSpace(body)) > 0 && bytes.TrimSpace(body)[0] == '[' {
+		if err := json.Unmarshal(body, &sessions); err != nil {
+			return "", fmt.Errorf("invalid ChatGPT session response: %w", err)
+		}
+	} else {
+		var session chatGPTAuthSession
+		if err := json.Unmarshal(body, &session); err != nil {
+			return "", fmt.Errorf("invalid ChatGPT session response: %w", err)
+		}
+		sessions = append(sessions, session)
 	}
 	for _, entry := range sessions {
 		if token := strings.TrimSpace(entry.AccessToken); token != "" {
@@ -173,90 +299,119 @@ func ChatGPTHeaders(session StoredWebSession, accessToken string) map[string]str
 	return headers
 }
 
-func buildChatGPTConversationBody(model string, messages []models.Message) (map[string]interface{}, error) {
-	var apiMessages []map[string]interface{}
+func chatGPTPrompt(messages []models.Message) (string, error) {
 	var systemParts []string
-	// Streams consumed: last assistant content + reasoning so reasoning models
-	// restart correctly, plus any pending tool calls.
-	var lastAssistant map[string]interface{}
+	var turns []string
 	for _, message := range messages {
-		text := ExtractText(message.Content, false)
+		text := strings.TrimSpace(ExtractText(message.Content, false))
 		switch message.Role {
 		case "system", "developer":
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
 		case "user":
-			apiMessages = append(apiMessages, map[string]interface{}{
-				"role": "user", "content": text, "author": map[string]interface{}{"role": "user"},
-			})
+			if text != "" {
+				turns = append(turns, "User:\n"+text)
+			}
 		case "assistant":
-			apiMessages = append(apiMessages, map[string]interface{}{
-				"role": "assistant", "content": text, "author": map[string]interface{}{"role": "assistant"},
-			})
-			if len(apiMessages) > 0 {
-				lastAssistant = apiMessages[len(apiMessages)-1]
+			if len(message.ToolCalls) > 0 {
+				raw, _ := json.Marshal(message.ToolCalls)
+				turns = append(turns, "Assistant tool call:\n"+string(raw))
+			} else if text != "" {
+				turns = append(turns, "Assistant:\n"+text)
 			}
 		case "tool", "function":
-			apiMessages = append(apiMessages, map[string]interface{}{
-				"role": "system", "content": "Tool result: " + text, "author": map[string]interface{}{"role": "system"},
-			})
+			if text != "" {
+				turns = append(turns, "Tool result:\n"+text)
+			}
 		default:
-			return nil, fmt.Errorf("ChatGPT Web does not support message role %s", message.Role)
+			return "", fmt.Errorf("ChatGPT Web does not support message role %s", message.Role)
 		}
 	}
-	_ = lastAssistant
-
-	if len(apiMessages) == 0 {
-		return nil, errors.New("ChatGPT requires at least one user message")
-	}
+	parts := make([]string, 0, len(systemParts)+len(turns))
 	if len(systemParts) > 0 {
-		constraint := " (System instructions are embedded above and must be followed.)"
-		apiMessages[0]["content"] = strings.Join(systemParts, "\n\n") + "\n\n" + apiMessages[0]["content"].(string) + constraint
+		parts = append(parts, strings.Join(systemParts, "\n\n"))
 	}
+	parts = append(parts, turns...)
+	prompt := strings.TrimSpace(strings.Join(parts, "\n\n"))
+	if prompt == "" {
+		return "", errors.New("ChatGPT requires at least one non-empty message")
+	}
+	return prompt, nil
+}
+
+func buildChatGPTConversationBody(model string, state WebChatState, messages []models.Message) (map[string]interface{}, error) {
+	prompt, err := chatGPTPrompt(messages)
+	if err != nil {
+		return nil, err
+	}
+	parentMessageID := strings.TrimSpace(state.ParentMessageID)
+	if parentMessageID == "" {
+		parentMessageID = qwenID()
+	}
+	var conversationID interface{}
+	if strings.TrimSpace(state.ChatID) != "" {
+		conversationID = strings.TrimSpace(state.ChatID)
+	}
+	_, timezoneOffsetSeconds := time.Now().Zone()
 	return map[string]interface{}{
-		"action":                        "next",
-		"messages":                      apiMessages,
-		"model":                         model,
-		"parent_message_id":             "",
-		"conversation_id":               "",
-		"sidebar_conversation_id":       nil,
-		"stream":                        true,
-		"timezone_offset_min":           -240,
-		"history_and_training_disabled": true,
+		"action": "next",
+		"messages": []map[string]interface{}{{
+			"id":          qwenID(),
+			"author":      map[string]interface{}{"role": "user"},
+			"create_time": float64(time.Now().UnixMilli()) / 1000,
+			"content":     map[string]interface{}{"content_type": "text", "parts": []string{prompt}},
+			"metadata":    map[string]interface{}{},
+		}},
+		"model":                   model,
+		"parent_message_id":       parentMessageID,
+		"conversation_id":         conversationID,
+		"sidebar_conversation_id": conversationID,
+		"stream":                  true,
+		"timezone_offset_min":     -timezoneOffsetSeconds / 60,
 	}, nil
 }
 
-func ChatGPTWebChat(session StoredWebSession, model string, messages []models.Message) (models.DeepSeekChatResult, error) {
+func ChatGPTWebChat(session StoredWebSession, model string, state WebChatState, messages []models.Message) (models.DeepSeekChatResult, WebChatState, error) {
 	if strings.TrimSpace(model) == "" {
-		return models.DeepSeekChatResult{}, errors.New("ChatGPT requires a non-empty model")
+		return models.DeepSeekChatResult{}, state, errors.New("ChatGPT requires a non-empty model")
 	}
 	accessToken, err := ChatGPTAccessToken(session)
 	if err != nil {
-		return models.DeepSeekChatResult{}, err
+		return models.DeepSeekChatResult{}, state, err
 	}
-	payload, err := buildChatGPTConversationBody(model, messages)
+	payload, err := buildChatGPTConversationBody(model, state, messages)
 	if err != nil {
-		return models.DeepSeekChatResult{}, err
+		return models.DeepSeekChatResult{}, state, err
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return models.DeepSeekChatResult{}, err
+		return models.DeepSeekChatResult{}, state, err
 	}
 	headers := ChatGPTHeaders(session, accessToken)
 
+	var result models.DeepSeekChatResult
 	if ChatGPTBrowserRelayAvailable() {
 		resp, relayErr := ChatGPTBrowserRelayRequest(session, http.MethodPost, chatGPTWebBaseURL+"/backend-api/conversation", raw, headers)
 		if relayErr == nil {
-			return chatGPTParseRelayResponse(resp)
+			result, err = chatGPTParseRelayResponse(resp)
+		} else {
+			result, err = chatGPTExecuteDirect(session, raw, headers)
 		}
-		// The relay was present but could not complete the request (e.g. the
-		// authenticated tab is not ready). Fall through to direct HTTP so the
-		// request is still attempted when no security challenge is present.
-		return chatGPTExecuteDirect(session, raw, headers)
+	} else {
+		result, err = chatGPTExecuteDirect(session, raw, headers)
 	}
-
-	return chatGPTExecuteDirect(session, raw, headers)
+	if err != nil {
+		return models.DeepSeekChatResult{}, state, err
+	}
+	if result.ConversationID != "" {
+		state.ChatID = result.ConversationID
+	}
+	if result.MessageID != "" {
+		state.ParentMessageID = result.MessageID
+	}
+	state.Model = model
+	return result, state, nil
 }
 
 func chatGPTExecuteDirect(session StoredWebSession, raw []byte, headers map[string]string) (models.DeepSeekChatResult, error) {
@@ -342,8 +497,21 @@ func parseChatGPTStream(reader io.Reader) (models.DeepSeekChatResult, error) {
 			continue
 		}
 		var event struct {
-			MessageType string `json:"message_type"`
-			Content     struct {
+			Type           string `json:"type"`
+			MessageType    string `json:"message_type"`
+			ConversationID string `json:"conversation_id"`
+			Message        *struct {
+				ID     string `json:"id"`
+				Author struct {
+					Role string `json:"role"`
+				} `json:"author"`
+				Content struct {
+					ContentType string        `json:"content_type"`
+					Text        string        `json:"text"`
+					Parts       []interface{} `json:"parts"`
+				} `json:"content"`
+			} `json:"message"`
+			Content struct {
 				MessageType string `json:"message_type"`
 				Text        string `json:"text"`
 				Parts       []struct {
@@ -360,6 +528,26 @@ func parseChatGPTStream(reader io.Reader) (models.DeepSeekChatResult, error) {
 		sawEvent = true
 		if event.Error != nil {
 			return models.DeepSeekChatResult{}, fmt.Errorf("ChatGPT stream error: %v", event.Error)
+		}
+		if event.ConversationID != "" {
+			result.ConversationID = event.ConversationID
+		}
+		if event.Message != nil && strings.EqualFold(event.Message.Author.Role, "assistant") {
+			text := chatGPTContentText(event.Message.Content.Text, event.Message.Content.Parts)
+			contentType := strings.ToLower(event.Message.Content.ContentType)
+			if event.Message.ID != "" {
+				result.MessageID = event.Message.ID
+			}
+			if text != "" {
+				if strings.Contains(contentType, "thought") || strings.Contains(contentType, "reason") {
+					result.ReasoningText = text
+				} else {
+					// Native conversation events contain the full message-so-far, not a delta.
+					result.Content = text
+					sawContent = true
+				}
+			}
+			continue
 		}
 		messageType := strings.ToLower(event.MessageType)
 		if event.Content.MessageType != "" {
@@ -399,7 +587,29 @@ func parseChatGPTStream(reader io.Reader) (models.DeepSeekChatResult, error) {
 	if !sawEvent {
 		return models.DeepSeekChatResult{}, errors.New("ChatGPT returned an empty stream")
 	}
+	if !sawContent && strings.TrimSpace(result.ReasoningText) == "" {
+		return models.DeepSeekChatResult{}, errors.New("ChatGPT stream ended without assistant content")
+	}
 	result.Usage.CompletionTokens = len(result.Content+result.ReasoningText) / 4
-	_ = sawContent
 	return result, nil
+}
+
+func chatGPTContentText(text string, parts []interface{}) string {
+	if strings.TrimSpace(text) != "" {
+		return text
+	}
+	var out strings.Builder
+	for _, part := range parts {
+		switch value := part.(type) {
+		case string:
+			out.WriteString(value)
+		case map[string]interface{}:
+			if candidate, ok := value["text"].(string); ok {
+				out.WriteString(candidate)
+			} else if candidate, ok := value["content"].(string); ok {
+				out.WriteString(candidate)
+			}
+		}
+	}
+	return out.String()
 }

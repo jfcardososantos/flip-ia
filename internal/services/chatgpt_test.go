@@ -1,11 +1,19 @@
 package services
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
 	"flip-ai/internal/models"
 )
+
+type chatGPTRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn chatGPTRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestResolveChatGPTWebModel(t *testing.T) {
 	cases := map[string]string{
@@ -45,6 +53,27 @@ func TestIsChatGPTWebModel(t *testing.T) {
 	}
 }
 
+func TestChatGPTAccessTokenAcceptsObjectSessionResponse(t *testing.T) {
+	originalClient := GlobalHTTPClient
+	GlobalHTTPClient = &http.Client{Transport: chatGPTRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"token-from-object"}`)),
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { GlobalHTTPClient = originalClient })
+
+	token, err := ChatGPTAccessToken(StoredWebSession{Cookie: "session=ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "token-from-object" {
+		t.Fatalf("token = %q", token)
+	}
+}
+
 func TestParseChatGPTStreamReadsContentAndReasoning(t *testing.T) {
 	input := "event: response.created\n\n" +
 		"data: {\"type\":\"response.output_text.delta\",\"message_type\":\"content\",\"content\":{\"text\":\"Hello \"}}\n\n" +
@@ -74,7 +103,7 @@ func TestBuildChatGPTConversationBodyEmbedsSystem(t *testing.T) {
 		{Role: "system", Content: "Be concise."},
 		{Role: "user", Content: "Hello"},
 	}
-	payload, err := buildChatGPTConversationBody("gpt-4o", messages)
+	payload, err := buildChatGPTConversationBody("gpt-4o", WebChatState{}, messages)
 	if err != nil {
 		t.Fatalf("buildChatGPTConversationBody error: %v", err)
 	}
@@ -85,9 +114,62 @@ func TestBuildChatGPTConversationBodyEmbedsSystem(t *testing.T) {
 	if len(first) == 0 {
 		t.Fatal("expected at least one message")
 	}
-	content, _ := first[0]["content"].(string)
+	contentMap, _ := first[0]["content"].(map[string]interface{})
+	parts, _ := contentMap["parts"].([]string)
+	content := strings.Join(parts, "")
 	if !strings.Contains(content, "Be concise.") {
 		t.Errorf("system instruction not embedded in first message: %q", content)
+	}
+}
+
+func TestBuildChatGPTConversationBodyContinuesConversation(t *testing.T) {
+	state := WebChatState{ChatID: "conv_1", ParentMessageID: "msg_1"}
+	payload, err := buildChatGPTConversationBody("gpt-4o", state, []models.Message{{Role: "user", Content: "Next"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["conversation_id"] != "conv_1" || payload["parent_message_id"] != "msg_1" {
+		t.Fatalf("conversation linkage missing: %+v", payload)
+	}
+	if _, exists := payload["history_and_training_disabled"]; exists {
+		t.Fatal("conversation history must not be forcibly disabled")
+	}
+}
+
+func TestParseChatGPTNativeConversationStream(t *testing.T) {
+	input := "data: {\"conversation_id\":\"conv_1\",\"message\":{\"id\":\"msg_1\",\"author\":{\"role\":\"assistant\"},\"content\":{\"content_type\":\"text\",\"parts\":[\"Hel\"]}}}\n\n" +
+		"data: {\"conversation_id\":\"conv_1\",\"message\":{\"id\":\"msg_1\",\"author\":{\"role\":\"assistant\"},\"content\":{\"content_type\":\"text\",\"parts\":[\"Hello\"]}}}\n\n" +
+		"data: [DONE]\n\n"
+	result, err := parseChatGPTStream(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "Hello" || result.ConversationID != "conv_1" || result.MessageID != "msg_1" {
+		t.Fatalf("unexpected native stream result: %+v", result)
+	}
+}
+
+func TestParseChatGPTWebModelsUsesAccountResponse(t *testing.T) {
+	models, err := parseChatGPTWebModels([]byte(`{
+		"default_model_slug":"gpt-current",
+		"models":[
+			{"slug":"gpt-current","title":"GPT Current","max_tokens":200000},
+			{"slug":"o-next","description":"Reasoning model","max_tokens":300000},
+			{"slug":"gpt-current","title":"duplicate"},
+			{"slug":"invalid/model"}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("model count = %d: %+v", len(models), models)
+	}
+	if models[0].Slug != "gpt-current" || !models[0].Default || models[0].MaxTokens != 200000 {
+		t.Fatalf("unexpected default model: %+v", models[0])
+	}
+	if models[1].Slug != "o-next" || models[1].Description != "Reasoning model" {
+		t.Fatalf("unexpected second model: %+v", models[1])
 	}
 }
 

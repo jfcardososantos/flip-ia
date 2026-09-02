@@ -6,8 +6,9 @@ type DeepSeekAuth struct {
 }
 
 type DeepSeekChatResult struct {
-	Content       string
-	ReasoningText string
-	MessageID     string
-	Usage         Usage
+	Content        string
+	ReasoningText  string
+	MessageID      string
+	ConversationID string
+	Usage          Usage
 }

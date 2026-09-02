@@ -133,6 +133,10 @@ func ResetChatGPTBrowserRelay(reason string) int {
 }
 
 func ChatGPTBrowserRelayRequest(session StoredWebSession, method, url string, body []byte, headers map[string]string) (*http.Response, error) {
+	return ChatGPTBrowserRelayRequestContext(context.Background(), session, method, url, body, headers)
+}
+
+func ChatGPTBrowserRelayRequestContext(ctx context.Context, session StoredWebSession, method, url string, body []byte, headers map[string]string) (*http.Response, error) {
 	if !ChatGPTBrowserRelayAvailable() {
 		return nil, ErrChatGPTBrowserRelayUnavailable
 	}
@@ -157,6 +161,8 @@ func ChatGPTBrowserRelayRequest(session StoredWebSession, method, url string, bo
 	case chatGPTBrowserRelay.jobs <- job:
 	case <-enqueueTimer.C:
 		return nil, errors.New("ChatGPT browser relay queue is unavailable")
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	timer := time.NewTimer(chatGPTBrowserRelayRequestTimeout())
@@ -183,6 +189,8 @@ func ChatGPTBrowserRelayRequest(session StoredWebSession, method, url string, bo
 		}, nil
 	case <-timer.C:
 		return nil, errors.New("ChatGPT browser relay timed out waiting for the authenticated tab")
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 

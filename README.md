@@ -372,6 +372,10 @@ Como o ChatGPT tem proteção anti-bot e tokens que expiram, mantenha o Chrome a
 
 O alias `chatgpt-web` usa o modelo principal (`gpt-4o` por padrão, ajustável com `CHATGPT_WEB_DEFAULT_MODEL`). Para usar um modelo específico, use `chatgpt-web/<modelo>` (ex.: `chatgpt-web/gpt-5`, `chatgpt-web/o3`).
 
+O proxy persiste `conversation_id` e `parent_message_id` do ChatGPT e envia somente os turnos novos. Para garantir continuidade entre chamadas, envie em `user` um identificador estável e exclusivo para cada conversa; gere outro valor ao iniciar um novo chat.
+
+Após importar a sessão, o catálogo consulta o endpoint autenticado de modelos do ChatGPT Web e publica somente os seletores retornados para aquela conta, além do alias `chatgpt-web`. Se a descoberta falhar, o último catálogo válido ou a lista de fallback permanece disponível.
+
 Variáveis opcionais:
 
 ```env

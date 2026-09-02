@@ -30,11 +30,12 @@ import (
 const upstreamFailureStatus = http.StatusFailedDependency
 
 var (
-	TokenStats       = make(map[string]int)
-	TokenUsageStats  = make(map[string]int)
-	ResponseTimes    = make([]int64, 0)
-	StatsMutex       sync.Mutex
-	qwenSessionLocks sync.Map
+	TokenStats          = make(map[string]int)
+	TokenUsageStats     = make(map[string]int)
+	ResponseTimes       = make([]int64, 0)
+	StatsMutex          sync.Mutex
+	qwenSessionLocks    sync.Map
+	chatGPTSessionLocks sync.Map
 )
 
 var (
@@ -954,19 +955,52 @@ func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, complet
 	if sessionHandle == "" {
 		sessionHandle = services.GenerateFingerprint(input.Messages)
 	}
+	if sessionHandle == "" {
+		sessionHandle = "chatgpt_" + completionID
+	}
+	lockValue, _ := chatGPTSessionLocks.LoadOrStore(sessionHandle, &sync.Mutex{})
+	sessionLock := lockValue.(*sync.Mutex)
+	sessionLock.Lock()
+	defer sessionLock.Unlock()
+
+	state, _ := services.GetWebChatState("chatgpt", sessionHandle)
+	if state.Provider == "" {
+		state.Provider = "chatgpt"
+		state.SessionKey = sessionHandle
+	}
+	if state.ChatID != "" && state.Model != "" && state.Model != upstreamModel {
+		resetChatGPTState(&state)
+	}
+	if state.ChatID != "" && state.ClientMessageCount > 0 {
+		lastIndex := state.ClientMessageCount - 1
+		if lastIndex >= len(input.Messages) || state.LastMessageHash == "" ||
+			services.QwenMessageHash(input.Messages[lastIndex]) != state.LastMessageHash {
+			resetChatGPTState(&state)
+		}
+	}
+	pendingMessages := chatGPTUnsentMessages(input.Messages, state)
+	toolInstructions := ""
 	if agentMode {
-		toolInstructions := utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice)
-		toolInstructions += chatGPTAgentAdapterInstructions()
-		messages = append([]models.Message{{Role: "system", Content: toolInstructions}}, messages...)
+		toolInstructions = utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice) + chatGPTAgentAdapterInstructions()
+		pendingMessages = append([]models.Message{{Role: "system", Content: toolInstructions}}, pendingMessages...)
 	}
 
 	outcome := chatGPTBufferedOutcome{}
 	outcome = awaitChatGPTBufferedResult(c, input.Stream, func() chatGPTBufferedOutcome {
-		result, chatErr := services.ChatGPTWebChat(session, upstreamModel, messages)
-		if chatErr == nil && agentMode {
-			result, chatErr = recoverChatGPTAgentToolCall(result, session, upstreamModel, messages, toolChoice, completionID, input.Tools)
+		result, updatedState, chatErr := services.ChatGPTWebChat(session, upstreamModel, state, pendingMessages)
+		if chatErr != nil && state.ChatID != "" && services.IsChatGPTConversationError(chatErr) {
+			freshState := state
+			resetChatGPTState(&freshState)
+			freshMessages := messages
+			if agentMode {
+				freshMessages = append([]models.Message{{Role: "system", Content: toolInstructions}}, freshMessages...)
+			}
+			result, updatedState, chatErr = services.ChatGPTWebChat(session, upstreamModel, freshState, freshMessages)
 		}
-		return chatGPTBufferedOutcome{result: result, err: chatErr}
+		if chatErr == nil && agentMode {
+			result, updatedState, chatErr = recoverChatGPTAgentToolCall(result, updatedState, session, upstreamModel, toolChoice, completionID, input.Tools)
+		}
+		return chatGPTBufferedOutcome{result: result, state: updatedState, err: chatErr}
 	})
 	result := outcome.result
 	if outcome.err != nil {
@@ -985,6 +1019,14 @@ func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, complet
 			utils.SendError(c, status, message, "server_error", nil)
 		}
 		return
+	}
+	state = outcome.state
+	state.ClientMessageCount = len(input.Messages)
+	if len(input.Messages) > 0 {
+		state.LastMessageHash = services.QwenMessageHash(input.Messages[len(input.Messages)-1])
+	}
+	if err := services.SaveWebChatState(state); err != nil {
+		fmt.Printf("[%s] Failed to persist ChatGPT web state: %v\n", completionID, err)
 	}
 	content, toolCalls := utils.ParseToolCalls(result.Content)
 	if agentMode {
@@ -1016,6 +1058,7 @@ func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, complet
 
 type chatGPTBufferedOutcome struct {
 	result models.DeepSeekChatResult
+	state  services.WebChatState
 	err    error
 }
 
@@ -1054,31 +1097,54 @@ func chatGPTAgentAdapterInstructions() string {
 `
 }
 
-func recoverChatGPTAgentToolCall(first models.DeepSeekChatResult, session services.StoredWebSession, model string, messages []models.Message, toolChoice, completionID string, tools []models.Tool) (models.DeepSeekChatResult, error) {
+func recoverChatGPTAgentToolCall(first models.DeepSeekChatResult, state services.WebChatState, session services.StoredWebSession, model string, toolChoice, completionID string, tools []models.Tool) (models.DeepSeekChatResult, services.WebChatState, error) {
 	result := first
 	for attempt := 0; attempt < 2; attempt++ {
 		clean, calls := utils.ParseToolCalls(result.Content)
 		calls = filterAllowedToolCalls(calls, tools, toolChoice)
 		if len(calls) > 0 {
-			return result, nil
+			return result, state, nil
 		}
 		parsed := parsedMimoChat{CleanText: clean, ReasoningText: result.ReasoningText, ToolCalls: calls}
 		if !shouldRetryAgentToolCall(parsed, toolChoice) {
-			return result, nil
+			return result, state, nil
 		}
-		retryMessages := append([]models.Message{}, messages...)
-		if strings.TrimSpace(result.Content) != "" {
-			retryMessages = append(retryMessages, models.Message{Role: "assistant", Content: result.Content})
-		}
-		retryMessages = append(retryMessages, models.Message{Role: "user", Content: buildAgentToolRetryQuery("", parsed)})
-		next, err := services.ChatGPTWebChat(session, model, retryMessages)
+		retryMessages := []models.Message{{Role: "user", Content: buildAgentToolRetryQuery("", parsed)}}
+		next, nextState, err := services.ChatGPTWebChat(session, model, state, retryMessages)
 		if err != nil {
 			fmt.Printf("[%s] ChatGPT agent recovery failed: %v\n", completionID, err)
-			return result, err
+			return result, state, err
 		}
 		result = next
+		state = nextState
 	}
-	return result, nil
+	return result, state, nil
+}
+
+func resetChatGPTState(state *services.WebChatState) {
+	state.ChatID = ""
+	state.ParentMessageID = ""
+	state.ClientMessageCount = 0
+	state.LastMessageHash = ""
+}
+
+func chatGPTUnsentMessages(messages []models.Message, state services.WebChatState) []models.Message {
+	if state.ChatID == "" || state.ClientMessageCount <= 0 {
+		return messages
+	}
+	if state.ClientMessageCount < len(messages) {
+		pending := messages[state.ClientMessageCount:]
+		if len(pending) > 0 && pending[0].Role == "assistant" && len(pending[0].ToolCalls) == 0 {
+			pending = pending[1:]
+		}
+		if len(pending) > 0 {
+			return pending
+		}
+	}
+	if len(messages) > 0 {
+		return messages[len(messages)-1:]
+	}
+	return nil
 }
 
 func buildQwenPrompt(messages []models.Message, toolInstructions string) string {

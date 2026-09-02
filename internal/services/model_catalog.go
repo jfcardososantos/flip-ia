@@ -117,6 +117,7 @@ func RefreshModelCatalog(ctx context.Context) error {
 	discoverers := []func(context.Context) catalogDiscoveryResult{
 		discoverDeepSeekModels,
 		discoverQwenModels,
+		discoverChatGPTModels,
 		discoverOpenRouterModels,
 		discoverGeminiModels,
 		discoverGroqModels,
@@ -474,6 +475,37 @@ func discoverQwenModels(ctx context.Context) catalogDiscoveryResult {
 	discoverQwenFrontendVersion(ctx, endpoint == officialEndpoint)
 	return catalogDiscoveryResult{
 		provider: "qwen", source: endpoint, defaultModel: defaultModel, models: models, attempted: true,
+	}
+}
+
+func discoverChatGPTModels(ctx context.Context) catalogDiscoveryResult {
+	if _, err := GetSelectedChatGPTSession(); err != nil {
+		return catalogDiscoveryResult{provider: "chatgpt"}
+	}
+	items, source, err := fetchChatGPTWebModels(ctx)
+	if err != nil {
+		return catalogDiscoveryResult{provider: "chatgpt", source: source, err: err, attempted: true}
+	}
+	models := []CatalogModel{{
+		ID: "chatgpt-web", Provider: "chatgpt", OwnedBy: "openai",
+		Description: "Alias for the current ChatGPT Web default model", Dynamic: true,
+	}}
+	defaultModel := ""
+	for _, item := range items {
+		if item.Default && defaultModel == "" {
+			defaultModel = item.Slug
+		}
+		description := firstNonEmpty(item.Description, item.Title, "ChatGPT Web model available to the imported account")
+		models = append(models, CatalogModel{
+			ID: "chatgpt-web/" + item.Slug, Provider: "chatgpt", OwnedBy: "openai",
+			Description: description, ContextLength: item.MaxTokens, Dynamic: true,
+		})
+	}
+	if defaultModel == "" && len(items) > 0 {
+		defaultModel = items[0].Slug
+	}
+	return catalogDiscoveryResult{
+		provider: "chatgpt", source: source, defaultModel: defaultModel, models: models, attempted: true,
 	}
 }
 

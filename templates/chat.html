@@ -345,8 +345,21 @@
           signal: controller.signal
         });
         if (!response.ok) {
-          const errorBody = await response.json().catch(() => ({}));
-          throw new Error(errorBody.error?.message || errorBody.error || `A API respondeu HTTP ${response.status}`);
+          const rawError = await response.text().catch(() => '');
+          let errorMessage = '';
+          try {
+            const errorBody = JSON.parse(rawError);
+            errorMessage = errorBody.error?.message || errorBody.error || errorBody.message || '';
+          } catch (_) {
+            errorMessage = rawError
+              .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+              .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
+          if (errorMessage.length > 800) errorMessage = errorMessage.slice(0, 800) + '…';
+          throw new Error(errorMessage || `A API respondeu HTTP ${response.status}`);
         }
         if (!response.body) throw new Error('A resposta não possui stream.');
 

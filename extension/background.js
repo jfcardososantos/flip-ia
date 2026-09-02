@@ -592,9 +592,6 @@ async function handleChatGPTRelayJob(config, job) {
   let payload;
   try {
     const result = await executeChatGPTJob({ ...job, terminal: CHATGPT_TERMINAL });
-    if (result.status < 200 || result.status >= 300) {
-      throw new Error(`ChatGPT HTTP ${result.status}; body=${String(result.body || "").slice(0, 500)}`);
-    }
     payload = {
       job_id: job.id,
       status: result.status,

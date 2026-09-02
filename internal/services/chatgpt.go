@@ -81,6 +81,9 @@ func fetchChatGPTWebModels(ctx context.Context) ([]chatGPTWebModelInfo, string, 
 	var response *http.Response
 	if ChatGPTBrowserRelayAvailable() {
 		response, err = ChatGPTBrowserRelayRequestContext(ctx, session, http.MethodGet, endpoint, nil, headers)
+		if err != nil {
+			return nil, endpoint, err
+		}
 	}
 	if response == nil && ctx.Err() == nil {
 		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -396,7 +399,7 @@ func ChatGPTWebChat(session StoredWebSession, model string, state WebChatState, 
 		if relayErr == nil {
 			result, err = chatGPTParseRelayResponse(resp)
 		} else {
-			result, err = chatGPTExecuteDirect(session, raw, headers)
+			return models.DeepSeekChatResult{}, state, relayErr
 		}
 	} else {
 		result, err = chatGPTExecuteDirect(session, raw, headers)
@@ -415,7 +418,10 @@ func ChatGPTWebChat(session StoredWebSession, model string, state WebChatState, 
 }
 
 func chatGPTExecuteDirect(session StoredWebSession, raw []byte, headers map[string]string) (models.DeepSeekChatResult, error) {
-	req, err := http.NewRequest(http.MethodPost, chatGPTWebBaseURL+"/backend-api/conversation", bytes.NewReader(raw))
+	timeout := time.Duration(intEnvOrDefault("CHATGPT_WEB_DIRECT_TIMEOUT_SECONDS", 60)) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatGPTWebBaseURL+"/backend-api/conversation", bytes.NewReader(raw))
 	if err != nil {
 		return models.DeepSeekChatResult{}, err
 	}

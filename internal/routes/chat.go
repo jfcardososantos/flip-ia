@@ -984,6 +984,17 @@ func handleChatGPTChatCompletions(c *gin.Context, input openAIChatInput, complet
 		toolInstructions = utils.FormatToolsAsInstructionsWithChoice(input.Tools, toolChoice) + chatGPTAgentAdapterInstructions()
 		pendingMessages = append([]models.Message{{Role: "system", Content: toolInstructions}}, pendingMessages...)
 	}
+	if input.Stream {
+		c.Header("Content-Type", "text/event-stream; charset=utf-8")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		if rc := http.NewResponseController(c.Writer); rc != nil {
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
+		c.Writer.WriteString(": chatgpt relay connected\n\n")
+		c.Writer.Flush()
+	}
 
 	outcome := chatGPTBufferedOutcome{}
 	outcome = awaitChatGPTBufferedResult(c, input.Stream, func() chatGPTBufferedOutcome {

@@ -3541,36 +3541,60 @@ func processNonStream(c *gin.Context, body io.Reader, completionID, model string
 }
 
 func completeToolCallBuffer(raw string) string {
-	if strings.Contains(raw, utils.ToolCallCloseTag) {
+	closeTag := toolCallClosingTag(raw)
+	if strings.Contains(raw, closeTag) {
 		return raw
 	}
-	return raw + utils.ToolCallCloseTag
+	return raw + closeTag
+}
+
+const (
+	dsmlFullwidthPrefix = "<｜｜DSML｜｜"
+	dsmlASCIIPrefix     = "<||DSML||"
+)
+
+func toolCallClosingTag(raw string) string {
+	if strings.HasPrefix(raw, dsmlFullwidthPrefix) || strings.HasPrefix(raw, dsmlASCIIPrefix) {
+		header := raw
+		if end := strings.Index(raw, ">"); end != -1 {
+			header = raw[:end]
+		}
+		if strings.Contains(header, " calls") {
+			if strings.HasPrefix(raw, dsmlFullwidthPrefix) {
+				return "</｜｜DSML｜｜ calls>"
+			}
+			return "</||DSML|| calls>"
+		}
+		if strings.HasPrefix(raw, dsmlFullwidthPrefix) {
+			return "</｜｜DSML｜｜ invoke>"
+		}
+		return "</||DSML|| invoke>"
+	}
+	return utils.ToolCallCloseTag
 }
 
 func findToolCallOpeningTag(s string) (int, int) {
-	searchFrom := 0
-	for {
-		idx := strings.Index(s[searchFrom:], "<tool_call")
-		if idx == -1 {
-			return -1, -1
-		}
-		idx += searchFrom
-
-		afterName := idx + len("<tool_call")
-		if afterName < len(s) {
-			next := s[afterName]
-			if next != '>' && next != ' ' && next != '\n' && next != '\t' && next != '\r' {
-				searchFrom = afterName
-				continue
+	best := -1
+	for _, prefix := range []string{"<tool_call", dsmlFullwidthPrefix + " calls", dsmlFullwidthPrefix + " invoke", dsmlASCIIPrefix + " calls", dsmlASCIIPrefix + " invoke"} {
+		idx := strings.Index(s, prefix)
+		if idx != -1 && prefix == "<tool_call" {
+			afterName := idx + len(prefix)
+			if afterName < len(s) && !strings.ContainsRune("> \n\t\r", rune(s[afterName])) {
+				idx = -1
 			}
 		}
-
-		closeIdx := strings.Index(s[idx:], ">")
-		if closeIdx == -1 {
-			return idx, len(s)
+		if idx != -1 && (best == -1 || idx < best) {
+			best = idx
 		}
-		return idx, idx + closeIdx + 1
 	}
+	if best == -1 {
+		return -1, -1
+	}
+	closeIdx := strings.Index(s[best:], ">")
+	if closeIdx == -1 {
+		return best, len(s)
+	}
+	return best, best + closeIdx + 1
 }
 
 func processEvent(c *gin.Context, eventType, dataStr, completionID, model string, isStreaming bool, inThinking, inToolCall, sentToolCallName *bool, currentToolID *string, toolCallIndex *int, toolCallBuffer, fullText, reasoningText *strings.Builder, usage *models.Usage) {
@@ -3641,7 +3665,8 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 		}
 
 		if *inToolCall {
-			endIdx := strings.Index(remaining, utils.ToolCallCloseTag)
+			closeTag := toolCallClosingTag(toolCallBuffer.String())
+			endIdx := strings.Index(remaining, closeTag)
 			contentToProcess := remaining
 			if endIdx != -1 {
 				contentToProcess = remaining[:endIdx]
@@ -3650,7 +3675,7 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 			toolCallBuffer.WriteString(contentToProcess)
 
 			if endIdx != -1 {
-				toolCallBuffer.WriteString(utils.ToolCallCloseTag)
+				toolCallBuffer.WriteString(closeTag)
 				rawToolCall := toolCallBuffer.String()
 				fullText.WriteString(rawToolCall)
 
@@ -3659,7 +3684,7 @@ func processEvent(c *gin.Context, eventType, dataStr, completionID, model string
 				*currentToolID = ""
 				*toolCallIndex++
 				toolCallBuffer.Reset()
-				remaining = remaining[endIdx+len(utils.ToolCallCloseTag):]
+				remaining = remaining[endIdx+len(closeTag):]
 			} else {
 				remaining = ""
 			}

@@ -8,6 +8,18 @@ import (
 	"flip-ai/internal/models"
 )
 
+func TestDSMLToolCallStreamDelimiters(t *testing.T) {
+	raw := `<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="terminal"></｜｜DSML｜｜ invoke>`
+	start, end := findToolCallOpeningTag("prefix" + raw)
+	if start != len("prefix") || end <= start {
+		t.Fatalf("failed to find DSML opening tag: start=%d end=%d", start, end)
+	}
+	completed := completeToolCallBuffer(raw)
+	if !strings.HasSuffix(completed, `</｜｜DSML｜｜ calls>`) {
+		t.Fatalf("expected DSML calls closing tag, got %q", completed)
+	}
+}
+
 func TestAgentLocationOnlyRegex(t *testing.T) {
 	text := "/Users/jfcardososantos/Documents/alfst-homepage/src/app/budget/page.tsx 80 20"
 	if !agentLocationOnlyRegex.MatchString(text) {

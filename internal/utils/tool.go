@@ -19,6 +19,9 @@ import (
 var (
 	trailingToolJSONRegex = regexp.MustCompile(`(?s)\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*.*\}$`)
 	fencedJSONRegex       = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
+	dsmlInvokeRegex       = regexp.MustCompile(`(?s)<(?:｜｜|\|\|)DSML(?:｜｜|\|\|)\s+invoke\s+([^<>]*?)>(.*?)</(?:｜｜|\|\|)DSML(?:｜｜|\|\|)\s+invoke\s*>`)
+	dsmlParameterRegex    = regexp.MustCompile(`(?s)<(?:｜｜|\|\|)DSML(?:｜｜|\|\|)\s+parameter\s+([^<>]*?)>(.*?)</(?:｜｜|\|\|)DSML(?:｜｜|\|\|)\s+parameter\s*>`)
+	dsmlCallsTagRegex     = regexp.MustCompile(`(?s)</?(?:｜｜|\|\|)DSML(?:｜｜|\|\|)\s+calls\s*>`)
 )
 
 // FormatToolsAsInstructions mirrors the simpler behavior from the first project version.
@@ -118,6 +121,22 @@ func AssignToolCallIndexes(toolCalls []models.ToolCall) []models.ToolCall {
 func ParseToolCalls(text string) (string, []models.ToolCall) {
 	var toolCalls []models.ToolCall
 	cleanText := text
+
+	// Some Hermes-compatible models emit DeepSeek's DSML envelope instead of
+	// the XML bridge requested in the prompt. Convert it before trying the more
+	// common tool-call dialects so it never leaks into assistant content.
+	for _, match := range dsmlInvokeRegex.FindAllStringSubmatch(text, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		if parsed := parseDSMLInvocation(match[1], match[2]); len(parsed) > 0 {
+			toolCalls = append(toolCalls, parsed...)
+			cleanText = strings.Replace(cleanText, match[0], "", 1)
+		}
+	}
+	if len(toolCalls) > 0 {
+		cleanText = dsmlCallsTagRegex.ReplaceAllString(cleanText, "")
+	}
 
 	toolCallRegex := regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
 	matches := toolCallRegex.FindAllStringSubmatch(text, -1)
@@ -230,6 +249,48 @@ func ParseToolCalls(text string) (string, []models.ToolCall) {
 
 	cleanText = strings.TrimSpace(cleanText)
 	return cleanText, toolCalls
+}
+
+func parseDSMLInvocation(attrsRaw string, bodyRaw string) []models.ToolCall {
+	name := xmlAttrValue(attrsRaw, "name")
+	if name == "" {
+		return nil
+	}
+
+	args := map[string]interface{}{}
+	for _, match := range dsmlParameterRegex.FindAllStringSubmatch(bodyRaw, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		attrs := parseXMLAttrs(match[1])
+		key := strings.TrimSpace(attrs["name"])
+		if key == "" {
+			continue
+		}
+
+		rawValue := strings.TrimSpace(html.UnescapeString(match[2]))
+		var value interface{} = rawValue
+		if strings.EqualFold(attrs["string"], "false") {
+			var decoded interface{}
+			if err := json.Unmarshal([]byte(rawValue), &decoded); err == nil {
+				value = decoded
+			}
+		}
+		args[key] = value
+	}
+
+	argsBytes, err := json.Marshal(args)
+	if err != nil {
+		return nil
+	}
+	return []models.ToolCall{{
+		ID:   "call_" + GenerateID(),
+		Type: "function",
+		Function: models.ToolFunction{
+			Name:      name,
+			Arguments: string(argsBytes),
+		},
+	}}
 }
 
 func parseHermesToolCallXML(raw string) []models.ToolCall {

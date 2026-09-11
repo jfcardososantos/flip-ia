@@ -45,6 +45,39 @@ func TestParseToolCallsHermesFunctionXML(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsDSML(t *testing.T) {
+	text := `<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="terminal">
+<｜｜DSML｜｜ parameter name="command" string="true">cd /opt/hermes; echo "ok"</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="timeout" string="false">120</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>`
+	clean, calls := ParseToolCalls(text)
+	if clean != "" {
+		t.Fatalf("expected empty clean text, got %q", clean)
+	}
+	if len(calls) != 1 || calls[0].Function.Name != "terminal" {
+		t.Fatalf("expected terminal call, got %+v", calls)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, `"command":"cd /opt/hermes; echo \"ok\""`) {
+		t.Fatalf("unexpected command argument: %s", calls[0].Function.Arguments)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, `"timeout":120`) {
+		t.Fatalf("expected numeric timeout argument: %s", calls[0].Function.Arguments)
+	}
+}
+
+func TestParseToolCallsMultipleDSMLInvocations(t *testing.T) {
+	text := `<||DSML|| calls>
+<||DSML|| invoke name="read_file"><||DSML|| parameter name="path" string="true">/tmp/a</||DSML|| parameter></||DSML|| invoke>
+<||DSML|| invoke name="read_file"><||DSML|| parameter name="path" string="true">/tmp/b</||DSML|| parameter></||DSML|| invoke>
+</||DSML|| calls>`
+	clean, calls := ParseToolCalls(text)
+	if clean != "" || len(calls) != 2 {
+		t.Fatalf("expected two clean DSML calls, clean=%q calls=%+v", clean, calls)
+	}
+}
+
 func TestParseToolCallsSelfClosingXMLArguments(t *testing.T) {
 	text := `Vou listar.
 <tool_call name="cronjob" arguments="{"action":"list"}"/>`

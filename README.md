@@ -408,6 +408,8 @@ O projeto converte ferramentas do formato OpenAI para o formato esperado pelo Mi
 
 Para DeepSeek, o proxy usa sessão web do navegador.
 
+O adaptador mantém os cabeçalhos `x-client-*` coerentes com o User-Agent importado. Se o DeepSeek alterar a versão mínima do frontend, ela pode ser ajustada sem recompilar usando `DEEPSEEK_CLIENT_VERSION` (e, se necessário, `DEEPSEEK_CLIENT_PLATFORM` e `DEEPSEEK_CLIENT_LOCALE`). Tokens importados da sessão web expiram; uma resposta `Authorization Failed` exige reimportar a sessão pela extensão.
+
 Recomendações:
 
 - mantenha o `model` explícito

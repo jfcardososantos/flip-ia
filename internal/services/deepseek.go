@@ -77,6 +77,16 @@ func DeepSeekHeaders(auth models.DeepSeekAuth, session StoredWebSession, customH
 	if strings.TrimSpace(session.UserAgent) != "" {
 		userAgent = strings.TrimSpace(session.UserAgent)
 	}
+	clientPlatform := "android"
+	clientVersion := "1.3.0-auto-resume"
+	clientLocale := "en_US"
+	// Sessions imported by the extension carry a browser User-Agent. DeepSeek
+	// validates the x-client metadata alongside that identity, so mixing a Web
+	// UA with the Android defaults can reject every model before generation.
+	if isDeepSeekBrowserUserAgent(userAgent) {
+		clientPlatform = "web"
+		clientVersion = "2.0.2"
+	}
 	origin := deepSeekBaseURL
 	if strings.TrimSpace(session.Origin) != "" {
 		origin = strings.TrimSpace(session.Origin)
@@ -87,23 +97,36 @@ func DeepSeekHeaders(auth models.DeepSeekAuth, session StoredWebSession, customH
 	}
 
 	headers := map[string]string{
-		"accept":          "application/json",
-		"accept-encoding": "gzip",
-		"authorization":   "Bearer " + auth.Token,
-		"content-type":    "application/json",
-		"cookie":          auth.Cookie,
-		"host":            "chat.deepseek.com",
-		"origin":          origin,
-		"referer":         referer,
-		"user-agent":      userAgent,
+		"accept":            "application/json",
+		"accept-charset":    "UTF-8",
+		"accept-encoding":   "gzip",
+		"authorization":     "Bearer " + auth.Token,
+		"content-type":      "application/json",
+		"cookie":            auth.Cookie,
+		"host":              "chat.deepseek.com",
+		"origin":            origin,
+		"referer":           referer,
+		"user-agent":        userAgent,
+		"x-client-locale":   clientLocale,
+		"x-client-platform": clientPlatform,
+		"x-client-version":  clientVersion,
 	}
 
 	for key, value := range session.Headers {
 		headers[strings.ToLower(strings.TrimSpace(key))] = value
 	}
-	for _, key := range []string{"accept-language", "user-agent", "origin", "referer"} {
+	for _, key := range []string{"accept-language", "user-agent", "origin", "referer", "x-app-version", "x-client-locale", "x-client-platform", "x-client-version"} {
 		if val, ok := customHeaders[key]; ok && strings.TrimSpace(val) != "" {
 			headers[key] = val
+		}
+	}
+	for envKey, headerKey := range map[string]string{
+		"DEEPSEEK_CLIENT_LOCALE":   "x-client-locale",
+		"DEEPSEEK_CLIENT_PLATFORM": "x-client-platform",
+		"DEEPSEEK_CLIENT_VERSION":  "x-client-version",
+	} {
+		if value := strings.TrimSpace(os.Getenv(envKey)); value != "" {
+			headers[headerKey] = value
 		}
 	}
 	if pow := strings.TrimSpace(os.Getenv("DEEPSEEK_POW_RESPONSE")); pow != "" {
@@ -111,6 +134,11 @@ func DeepSeekHeaders(auth models.DeepSeekAuth, session StoredWebSession, customH
 	}
 
 	return headers
+}
+
+func isDeepSeekBrowserUserAgent(userAgent string) bool {
+	lower := strings.ToLower(userAgent)
+	return strings.Contains(lower, "mozilla/") || strings.Contains(lower, "chrome/") || strings.Contains(lower, "safari/") || strings.Contains(lower, "firefox/")
 }
 
 func CreateDeepSeekSession(auth models.DeepSeekAuth, session StoredWebSession, customHeaders map[string]string) (string, error) {
@@ -139,20 +167,27 @@ func CreateDeepSeekSession(auth models.DeepSeekAuth, session StoredWebSession, c
 		Msg  string `json:"msg"`
 		Data struct {
 			BizData struct {
-				ID string `json:"id"`
+				ID          string `json:"id"`
+				ChatSession struct {
+					ID string `json:"id"`
+				} `json:"chat_session"`
 			} `json:"biz_data"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
-	if result.Code != 0 || result.Data.BizData.ID == "" {
+	sessionID := strings.TrimSpace(result.Data.BizData.ID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(result.Data.BizData.ChatSession.ID)
+	}
+	if result.Code != 0 || sessionID == "" {
 		if result.Msg == "" {
 			result.Msg = string(body)
 		}
 		return "", fmt.Errorf("DeepSeek session business error: %d - %s", result.Code, result.Msg)
 	}
-	return result.Data.BizData.ID, nil
+	return sessionID, nil
 }
 
 func SendDeepSeekChatRequest(auth models.DeepSeekAuth, session StoredWebSession, sessionID string, prompt string, thinking bool, search bool, modelType string, customHeaders map[string]string) (*http.Response, error) {
@@ -213,6 +248,14 @@ func ParseDeepSeekStreamMode(body io.Reader, thinking bool) models.DeepSeekChatR
 			break
 		}
 	}
+	// Some Expert responses currently finish with the answer in a THINK-like
+	// fragment and never announce a RESPONSE fragment. Only promote that text
+	// after an explicit terminal status, avoiding successful-but-empty replies
+	// without exposing partial reasoning from interrupted streams.
+	if state.finished && !state.sawResponseFragment && strings.TrimSpace(result.Content) == "" && strings.TrimSpace(result.ReasoningText) != "" {
+		result.Content = result.ReasoningText
+		result.ReasoningText = ""
+	}
 
 	if result.Usage.TotalTokens == 0 {
 		result.Usage.CompletionTokens = len(result.Content+result.ReasoningText) / 4
@@ -229,7 +272,9 @@ const (
 )
 
 type deepSeekStreamState struct {
-	target deepSeekStreamTarget
+	target              deepSeekStreamTarget
+	sawResponseFragment bool
+	finished            bool
 }
 
 func ReadDeepSeekBody(resp *http.Response) (io.Reader, func()) {
@@ -334,6 +379,7 @@ func parseDeepSeekDataWithState(dataStr string, result *models.DeepSeekChatResul
 		state.target = deepSeekReasoningTarget
 	} else if strings.Contains(lowerPath, "response/content") && !strings.Contains(lowerPath, "fragments") {
 		state.target = deepSeekContentTarget
+		state.sawResponseFragment = true
 	}
 
 	if parseDeepSeekFragments(v, result, state) {
@@ -346,6 +392,9 @@ func parseDeepSeekDataWithState(dataStr string, result *models.DeepSeekChatResul
 	}
 	cleanText := strings.TrimSpace(text)
 	if cleanText == "FINISHED" || cleanText == "RESPONSE_FINISHED" || strings.Contains(lowerPath, "status") {
+		if cleanText == "FINISHED" || cleanText == "RESPONSE_FINISHED" {
+			state.finished = true
+		}
 		return
 	}
 	if state.target == deepSeekReasoningTarget {
@@ -376,11 +425,12 @@ func parseDeepSeekFragments(value interface{}, result *models.DeepSeekChatResult
 		fragment, _ := rawFragment.(map[string]interface{})
 		fragmentType, _ := fragment["type"].(string)
 		switch strings.ToUpper(strings.TrimSpace(fragmentType)) {
-		case "THINK", "THINKING", "REASONING":
+		case "THINK", "THINKING", "REASONING", "SEARCH", "SEARCH_REF":
 			state.target = deepSeekReasoningTarget
 			handled = true
 		case "RESPONSE", "ANSWER":
 			state.target = deepSeekContentTarget
+			state.sawResponseFragment = true
 			handled = true
 		default:
 			continue
